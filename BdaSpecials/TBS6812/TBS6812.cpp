@@ -96,6 +96,8 @@ class Specials final : public IBdaSpecials2b5 {
     bool fatal_=false, bootstrapPending_=false, finalized_=false;
     bool inspectWarm_=false;
     bool warmStart_=false;
+    tbs6812::SatelliteSystem system_=tbs6812::SatelliteSystem::ISDBS3;
+    bool validSystem_=true;
     std::wstring cacheDirectory_,cachePath_;
     uint64_t deviceHash_=0;
     std::optional<tbs6812::WarmStartRecord> originalRecord_;
@@ -130,7 +132,7 @@ class Specials final : public IBdaSpecials2b5 {
     }
     static uint32_t IF(const TuningParam& p) { return tbs6812::Cxd2857::IntermediateFrequency(p.Frequency,p.Antenna.LowOscillator); }
     bool Supported(const TuningParam* p) {
-        return p && tbs6812::Cxd2857::IsS3(p->TSID) && (p->Polarisation==BDA_POLARISATION_CIRCULAR_R || p->Polarisation==BDA_POLARISATION_CIRCULAR_L) && p->Antenna.Tone==0 && p->Antenna.DiSEqC<=0;
+        return p && tbs6812::Cxd2857::SupportsID(p->TSID,system_) && (p->Polarisation==BDA_POLARISATION_CIRCULAR_R || p->Polarisation==BDA_POLARISATION_CIRCULAR_L) && p->Antenna.Tone==0 && p->Antenna.DiSEqC<=0;
     }
     const HRESULT Error(const char* stage,const std::exception& e) { Log(std::string(stage)+": "+e.what()); return E_FAIL; }
 public:
@@ -140,6 +142,10 @@ public:
         lockTimeout_=std::clamp<DWORD>(GetPrivateProfileIntW(L"TBS6812",L"LockTimeoutMs",3000,path),100,10000);
         inspectWarm_=GetPrivateProfileIntW(L"TBS6812",L"InspectWarmState",0,path)!=0;
         warmStart_=GetPrivateProfileIntW(L"TBS6812",L"ExperimentalWarmStart",0,path)!=0;
+        wchar_t system[32]{};
+        GetPrivateProfileStringW(L"TBS6812",L"SatelliteSystem",L"ISDB-S3",system,32,path);
+        validSystem_=_wcsicmp(system,L"ISDB-S")==0 || _wcsicmp(system,L"ISDB-S3")==0;
+        system_=_wcsicmp(system,L"ISDB-S")==0 ? tbs6812::SatelliteSystem::ISDBS : tbs6812::SatelliteSystem::ISDBS3;
         wchar_t directory[MAX_PATH]{};
         GetPrivateProfileStringW(L"TBS6812",L"WarmStartCacheDirectory",L"",directory,MAX_PATH,path);
         cacheDirectory_=directory;
@@ -148,6 +154,7 @@ public:
     const HRESULT InitializeHook() override {
         std::lock_guard<std::mutex> guard(mutex_);
         try {
+            if(!validSystem_) throw std::runtime_error("SatelliteSystem must be ISDB-S or ISDB-S3");
             if(tunerIndex_<0) throw std::runtime_error("only PCI TBS6812 Tuner 0/1 is supported");
             // Stable device-path hash keeps claims independent across slots and cards.
             uint64_t hash=14695981039346656037ULL;
@@ -159,13 +166,13 @@ public:
             property_=Properties(tuner_);
             DWORD support=0; HRESULT hr=property_->QuerySupported(accessSet,0x19,&support);
             if(FAILED(hr) || (support&(KSPROPERTY_SUPPORT_GET|KSPROPERTY_SUPPORT_SET))!=(KSPROPERTY_SUPPORT_GET|KSPROPERTY_SUPPORT_SET)) throw std::runtime_error("raw I2C property 0x19 is unavailable");
-            bus_=std::make_unique<KsBus>(property_); chip_=std::make_unique<tbs6812::Cxd2857>(*bus_,unsigned(tunerIndex_));
+            bus_=std::make_unique<KsBus>(property_); chip_=std::make_unique<tbs6812::Cxd2857>(*bus_,unsigned(tunerIndex_),system_);
             BYTE modes[8]{}; DWORD returned=0;
             hr=property_->Get(accessSet,0x3c,nullptr,0,modes,sizeof(modes),&returned);
             if(FAILED(hr)) throw std::runtime_error("read tuner modes: "+HResult(hr));
             if(returned<=DWORD(tunerIndex_)) throw std::runtime_error("tuner mode property returned a truncated slot array");
             if(modes[tunerIndex_]!=2) throw std::runtime_error("selected tuner must already be in satellite mode; no card-wide mode changes are performed");
-            Log(warmStart_ ? "initialized: experimental cached warm start; vendor fallback available" : "initialized: warm ISDB-S3 takeover; vendor bootstrap required");
+            Log(warmStart_ ? "initialized: experimental cached warm start; vendor fallback available" : "initialized: warm satellite takeover; vendor bootstrap required");
             if(warmStart_) {
                 if(cacheDirectory_.empty() || !std::filesystem::path(cacheDirectory_).is_absolute()) throw std::runtime_error("experimental warm start requires an absolute cache directory");
                 std::filesystem::create_directories(cacheDirectory_);
@@ -186,18 +193,19 @@ public:
     const HRESULT Set22KHz(bool active) override { return active?E_INVALIDARG:S_OK; }
     const HRESULT Set22KHz(long tone) override { return tone==0?S_OK:E_INVALIDARG; }
     const HRESULT SetTSid(long id) override {
-        if(!property_ || !tbs6812::Cxd2857::IsS3(id)) return E_INVALIDARG;
+        if(!property_ || !tbs6812::Cxd2857::SupportsID(id,system_)) return E_INVALIDARG;
         return property_->Set(accessSet,0x60,&id,sizeof(id),&id,sizeof(id));
     }
     const HRESULT LockChannel(const TuningParam* p) override {
         std::lock_guard<std::mutex> guard(mutex_);
         if(fatal_ || finalized_ || !chip_) return E_FAIL;
-        if(!Supported(p)) { Log("rejected: this extension accepts circular ISDB-S3 channels with tone off only"); return E_INVALIDARG; }
+        if(!Supported(p)) { Log("rejected: this extension accepts configured circular satellite channels with tone off only"); return E_INVALIDARG; }
         try {
             const auto frequency=IF(*p);
+            if(system_==tbs6812::SatelliteSystem::ISDBS && frequency>2150000) throw std::runtime_error("ISDB-S IF must be 950..2150 MHz");
             if(!chip_->Adopted()) {
                 if(!cachePath_.empty()) {
-                    const auto cached=tbs6812::ReadWarmRecord(cachePath_,deviceHash_);
+                    const auto cached=tbs6812::ReadWarmRecord(cachePath_,deviceHash_,system_);
                     ConsumeCache(); // A crash from this point cannot reuse stale state.
                     if(cached) {
                         try {
@@ -206,12 +214,16 @@ public:
                             Log("warm-cache adopted: skipping vendor TuneRequest");
                         } catch(const std::exception& e) {
                             Log(std::string("warm-cache rejected: ")+e.what());
-                            chip_=std::make_unique<tbs6812::Cxd2857>(*bus_,unsigned(tunerIndex_));
+                            chip_=std::make_unique<tbs6812::Cxd2857>(*bus_,unsigned(tunerIndex_),system_);
                         }
                     } else { Log("warm-cache absent/invalid: vendor bootstrap required"); }
                 }
             }
             if(!chip_->Adopted()) {
+                if(system_==tbs6812::SatelliteSystem::ISDBS && p->TSID<8) {
+                    Log("bootstrap requires an absolute TSID; relative TS indices are supported after adoption only");
+                    return E_INVALIDARG;
+                }
                 bootstrap_=*p; bootstrapPending_=true;
                 const HRESULT hr=SetLNBPower(true); if(FAILED(hr)) throw std::runtime_error("LNB preparation failed: "+HResult(hr));
                 Log("bootstrap: returning E_NOINTERFACE for the initial vendor tune only");
@@ -226,7 +238,7 @@ public:
                 }
                 Sleep(5);
             } while(std::chrono::steady_clock::now()-start<std::chrono::milliseconds(lockTimeout_));
-            Log("direct tune timed out: no ISDB-S3 lock; vendor tune was not resubmitted");
+            Log("direct tune timed out: no satellite lock; vendor tune was not resubmitted");
             return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
         } catch(const std::exception& e) { return Error("direct tune",e); }
     }
@@ -237,7 +249,7 @@ public:
         try {
             if(!chip_->Locked()) throw std::runtime_error("initial vendor tune did not lock; close/reopen before retrying");
             chip_->Adopt(IF(bootstrap_),uint16_t(bootstrap_.TSID));
-            originalRecord_=tbs6812::WarmStartRecord{IF(bootstrap_),uint16_t(bootstrap_.TSID)};
+            originalRecord_=tbs6812::WarmStartRecord{IF(bootstrap_),uint16_t(bootstrap_.TSID),system_};
             Inspect("after-vendor");
             Log("bootstrap adopted: CXD2857ER already active; no chip reset or clock reinitialization");
             return S_OK;

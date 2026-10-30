@@ -15,7 +15,8 @@ https://github.com/Till0196/coax/tree/2ef4838227f5c8f968f9acd74161c0437a165dc6
 Copyright (c) Sony; TurboSight; 2026 Till0196. These adaptations are distributed
 under GPL-2.0-or-later. See COPYING. No external firmware is included.
 
-This extension only adopts a vendor-initialized, active ISDB-S3 demodulator.
+This extension only adopts a vendor-initialized, active ISDB-S or ISDB-S3 demodulator.
 It intentionally does not port the cold initialization, PLL, GPIO, terrestrial,
-or ISDB-S mode transitions. It does not bypass conditional-access processing;
-the existing dantto4k/card path remains responsible for that.
+or direct cross-system mode transitions. It does not bypass conditional-access processing;
+TVTest/EDCB handles conventional TS access, and the existing dantto4k/card path
+handles S3 access.

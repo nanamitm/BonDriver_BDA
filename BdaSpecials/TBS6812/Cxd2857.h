@@ -12,10 +12,12 @@ struct I2cBus {
     virtual Bytes Read(uint8_t address, uint8_t reg, size_t length) = 0;
 };
 
-// Warm ISDB-S3 takeover only. No reset, clock, board-mode or shared-GPIO writes.
+enum class SatelliteSystem : unsigned { ISDBS = 1, ISDBS3 = 3 };
+
+// Warm satellite takeover only. No reset, clock, board-mode or shared-GPIO writes.
 class Cxd2857 {
 public:
-    explicit Cxd2857(I2cBus& bus, unsigned tunerIndex = 0);
+    explicit Cxd2857(I2cBus& bus, unsigned tunerIndex = 0, SatelliteSystem system = SatelliteSystem::ISDBS3);
     void Adopt(uint32_t frequencyKHz, uint16_t expectedStreamID);
     void Tune(uint32_t frequencyKHz, uint16_t streamID);
     void Restore();
@@ -26,9 +28,14 @@ public:
     void AdoptCached(uint32_t frequencyKHz, uint16_t streamID);
     static uint32_t IntermediateFrequency(long rfKHz, long oscillatorKHz);
     static bool IsS3(long streamID);
+    static bool SupportsID(long streamID, SatelliteSystem system);
 private:
     I2cBus& bus_;
     uint8_t tunerAddress_;
+    SatelliteSystem system_;
+    bool S3() const { return system_ == SatelliteSystem::ISDBS3; }
+    void Output(uint8_t value);
+    bool Valid(uint32_t frequency, uint16_t streamID) const;
     bool adopted_ = false, dirty_ = false;
     uint32_t originalFrequency_ = 0;
     Bytes originalStream_;

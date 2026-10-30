@@ -89,6 +89,37 @@ int main() {
             Require(rejected && !staleChip.Adopted(),"inactive cached state rejected before adoption");
             for(const auto& w:stale.writes) Require(w.first!=0x60 && w.first!=0x61,"rejected cached state does not write RF");
         }
+        FakeBus standard;
+        standard.registers[{0x66,0,0x17}]=0x0c;
+        standard.registers[{0x64,0,0xa9}]=0;
+        standard.registers[{0x64,0xc0,0xe9}]=0x40;
+        standard.registers[{0x64,0xc0,0xea}]=0x10;
+        Cxd2857 standardChip(standard,0,SatelliteSystem::ISDBS);
+        Require(!standardChip.Locked(),"ISDB-S must not use S3 lock bit");
+        standard.registers[{0x64,0xa0,0x12}]=0x40;
+        standardChip.AdoptCached(1049480,0x4010);
+        standardChip.Tune(1087840,0x4030);
+        Require(standard.At(0x64,0xc0,0xe9)==0x40 && standard.At(0x64,0xc0,0xea)==0x30 &&
+            standard.At(0x64,0xc0,0xeb)==0 && standard.At(0x64,0,0xc3)==0,"absolute TSID and TS enable");
+        Require(standard.At(0x60,0,7)==0x80 && standard.At(0x60,0,8)==0x70 &&
+            standard.At(0x60,0,9)==0x1e && standard.At(0x60,0,0x0b)==0x24,"ISDB-S RF filters");
+        standardChip.Tune(1049480,2);
+        Require(standard.At(0x64,0xc0,0xea)==2 && standard.At(0x64,0xc0,0xeb)==1,"relative TS index selection");
+        standard.registers[{0x64,0xa1,0x10}]=1;
+        standard.registers[{0x64,0xa1,0x11}]=0;
+        standard.registers[{0x64,0xa1,0x12}]=0x41;
+        Require(standardChip.CNR()==15.0f,"ISDB-S C/N curve and monitor bank");
+        standardChip.Restore();
+        Require(standard.At(0x64,0xc0,0xea)==0x10 && standard.At(0x64,0xc0,0xeb)==0 &&
+            standard.At(0x64,0,0xc3)==0,"ISDB-S restores bootstrap TS selection and output");
+        standard.writes.clear();
+        rejected=false; try { standardChip.Tune(2471820,0x4010); } catch(...) { rejected=true; }
+        Require(rejected && standard.writes.empty(),"ISDB-S rejects out-of-band IF before writes");
+        rejected=false; try { standardChip.Tune(1049480,0xb070); } catch(...) { rejected=true; }
+        Require(rejected && standard.writes.empty(),"ISDB-S rejects S3 stream before writes");
+        FakeBus otherMode; Cxd2857 otherModeChip(otherMode,0,SatelliteSystem::ISDBS);
+        rejected=false; try { otherModeChip.Adopt(1049480,0x4010); } catch(...) { rejected=true; }
+        Require(rejected && !otherModeChip.Adopted(),"wrong demodulator core rejected");
         const auto path=std::filesystem::temp_directory_path()/("tbs6812-cache-test-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".state");
         struct Cleanup { std::filesystem::path path; ~Cleanup(){std::error_code error;std::filesystem::remove(path,error);} } cleanup{path};
         Require(!ReadWarmRecord(path,17),"missing cache rejected");
@@ -96,6 +127,12 @@ int main() {
         const auto saved=ReadWarmRecord(path,17);
         Require(saved && saved->frequencyKHz==1164560 && saved->streamID==0xb070,"cache round trip");
         Require(!ReadWarmRecord(path,18),"different device cache rejected");
+        Require(!ReadWarmRecord(path,17,SatelliteSystem::ISDBS),"S3 record cannot bootstrap ISDB-S");
+        WriteWarmRecord(path,17,{1049480,0x4010,SatelliteSystem::ISDBS});
+        Require(bool(ReadWarmRecord(path,17,SatelliteSystem::ISDBS)),"ISDB-S cache round trip");
+        Require(!ReadWarmRecord(path,17),"ISDB-S record cannot bootstrap S3");
+        { std::ofstream legacy(path); legacy<<"TBS6812-WARM-1 17 1164560 45168 "<<WarmChecksum(17,1164560,45168)<<'\n'; }
+        Require(bool(ReadWarmRecord(path,17)) && !ReadWarmRecord(path,17,SatelliteSystem::ISDBS),"legacy cache is S3 only");
         WriteWarmRecord(path,17,{1,0xb070}); Require(!ReadWarmRecord(path,17),"invalid cached IF rejected");
         WriteWarmRecord(path,17,{1164560,0x4010}); Require(!ReadWarmRecord(path,17),"invalid cached stream rejected");
         { std::ofstream corrupt(path); corrupt<<"TBS6812-WARM-1 17 1164560 45168 0\n"; }
