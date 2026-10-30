@@ -1,0 +1,7 @@
+"Round","Name","Tuner","Channel","Warm","TuneMs","FirstDataMs","ExitCode"
+"seed","seed-0","1","BS07/TS0","False","8812.57","9139.78","0"
+"seed","seed-1","0","BS11/TS0","False","8857.31","8985.77","0"
+"warm4k","warm4k-0","1","BS07/TS0","True","997.502","1310.62","0"
+"warm4k","warm4k-1","0","BS11/TS0","True","1033.03","1160.51","0"
+"warm-mixed","warm-mixed-0","1","BS14/TS0","True","682.928","1012.51","0"
+"warm-mixed","warm-mixed-1","0","BS07/TS1","True","1043.1","1152.42","0"
