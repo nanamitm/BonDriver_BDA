@@ -3,6 +3,7 @@
 This extension replaces per-channel vendor BDA tuning with raw I2C through
 property 0x19. It supports **TBS6812 Tuner 0/1 with matching Capture 0/1,
 ISDB-S3 only**, including two simultaneous receiver processes.
+The shared-driver configuration can automatically claim an available slot.
 The vendor Windows driver and the BonDriver_BDA capture graph remain in use.
 The existing dantto4k DLL remains responsible for conditional access and TS remux.
 
@@ -77,6 +78,52 @@ IDs or conditional-access data.
 
 ### Two receivers
 
+#### One shared BonDriver with automatic allocation
+
+```powershell
+./tools/deploy-tbs.ps1 -TVTestDirectory 'C:\path\to\TVTest' -Direct -AutoSelect
+```
+
+Both TVTest processes select the same `BonDriver_dantto4k.dll`. The auto template
+matches the model without specifying a slot:
+
+```ini
+[Tuner]
+UseSpecial="TBS6812"
+FriendlyName0="TBS 6812 ISDB-T/S/S3 Tuner"
+CaptureFriendlyName0="TBS 6812 ISDB-T/S/S3 Capture"
+```
+
+BonDriver_BDA's existing per-device named semaphore atomically claims a tuner
+across processes. A busy candidate is skipped; if all candidates are busy,
+OpenTuner fails. Windows supplies enumeration order, so slot 0 is not guaranteed
+to be chosen first. Once opened, the slot remains assigned until CloseTuner;
+changing channels does not allocate another tuner. TBS6812's CheckCapture rejects
+a different slot or PCI board before graph capture starts.
+
+The deployment disables the shared optional MMTS dump and archives the former
+`BonDriver_dantto4k_Tuner1.dll`, INI and ch2 under `work/deployment-backups`.
+The rebuilt dantto4k outer DLL from the previous dual-receiver setup is reused.
+
+#### Explicit assignment takes precedence
+
+An INI that specifies one numbered tuner only considers that tuner. For example:
+
+```ini
+[Tuner]
+UseSpecial="TBS6812"
+FriendlyName0="TBS 6812 ISDB-T/S/S3 Tuner 1"
+CaptureFriendlyName0="TBS 6812 ISDB-T/S/S3 Capture 1"
+```
+
+If Tuner 1 is busy, this configuration fails even when Tuner 0 is free. Existing
+fixed INIs retain this behavior. `-Direct -TunerIndex 0` or `-Direct -TunerIndex 1`
+deploys a fixed configuration; these options cannot be combined with -AutoSelect.
+If multiple numbered FriendlyName entries are deliberately listed, only those
+listed candidates are considered, in their configured order.
+
+#### Separate explicitly assigned receivers (alternative)
+
 ```powershell
 ./tools/deploy-tbs.ps1 -TVTestDirectory 'C:\path\to\TVTest' -Direct -Dual
 ```
@@ -141,6 +188,17 @@ first 2 MiB, that capture identified the requested B070/service 151 with zero
 continuity errors. The continuously receiving peer was unaffected. Initial
 vendor preparation still takes about nine seconds; subsequent raw SetChannel
 calls took roughly 0.7–1.1 seconds in the standalone Tuner 1 check.
+
+Automatic allocation was then verified with two processes loading exactly the
+same DLL and INI. A third OpenTuner failed while both slots were busy, and a
+new process reused the first slot after it closed while the peer kept receiving.
+Explicitly pinning either busy slot failed even when the other was free; both
+fixed configurations also opened successfully once free. The raw TLV/MMTP and
+converted TS captures had zero sync/continuity errors, with the requested B070,
+B0B0 and B0E0 stream IDs. The final installed shared outer DLL was also opened
+by two processes concurrently, selecting different slots and exiting normally.
+`tools/test-auto-tbs6812.ps1` runs the allocation/rejection/reuse/fixed tests
+against staged auto/fixed0/fixed1 configurations, optionally through dantto4k.
 
 The ported satellite sequence and C/N curve are GPL-2.0-or-later. See
 `BdaSpecials/TBS6812/NOTICE.md` and `COPYING` for origin and license details.

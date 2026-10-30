@@ -4,10 +4,15 @@ param(
     [string]$Subdirectory = '4k8kdrver-built',
     [switch]$Direct,
     [switch]$Dual,
+    [switch]$AutoSelect,
+    [ValidateSet(0,1)][int]$TunerIndex = 0,
     [string]$DanttoWrapperPath
 )
 $ErrorActionPreference = 'Stop'
 if ($Dual -and !$Direct) { throw '-Dual requires -Direct.' }
+if ($PSBoundParameters.ContainsKey('TunerIndex') -and !$Direct) { throw '-TunerIndex requires -Direct.' }
+if ($AutoSelect -and (!$Direct -or $Dual -or $PSBoundParameters.ContainsKey('TunerIndex'))) { throw '-AutoSelect requires -Direct and cannot be combined with -Dual or -TunerIndex.' }
+if ($Dual -and $TunerIndex -ne 0) { throw '-Dual requires TunerIndex 0 as the primary slot.' }
 if ($DanttoWrapperPath) { $DanttoWrapperPath = (Resolve-Path -LiteralPath $DanttoWrapperPath).Path }
 $repo = Split-Path $PSScriptRoot -Parent
 if ($Direct -and !$PSBoundParameters.ContainsKey('Subdirectory')) { $Subdirectory = '4k8kdrver-direct' }
@@ -32,6 +37,7 @@ if ($Direct) {
     $sources['BonDriver_BDA_4k.ini'] = Join-Path $repo 'config\BonDriver_BDA_4k_direct.ini'
     $sources['COPYING-TBS6812.txt'] = Join-Path $repo 'BdaSpecials\TBS6812\COPYING'
     $sources['NOTICE-TBS6812.md'] = Join-Path $repo 'BdaSpecials\TBS6812\NOTICE.md'
+    if ($AutoSelect) { $sources['BonDriver_BDA_4k.ini'] = Join-Path $repo 'config\BonDriver_BDA_4k_auto.ini' }
 }
 foreach ($source in $sources.Values) {
     if (!(Test-Path -LiteralPath $source)) { throw "Missing build/configuration: $source" }
@@ -49,6 +55,10 @@ $settingMatches = [regex]::Matches($text, $pattern)
 if ($settingMatches.Count -ne 1) { throw 'Expected exactly one active bondriverPath setting.' }
 $relative = '.\' + $Subdirectory + '\BonDriver_BDA_4k.dll'
 $updated = [regex]::Replace($text, $pattern, [Text.RegularExpressions.MatchEvaluator]{ param($match) 'bondriverPath=' + $relative })
+if ($AutoSelect) {
+    # Every process now reads the same INI; a shared optional dump would collide.
+    $updated = [regex]::Replace($updated, '(?m)^[ \t]*mmtsDumpPath[ \t]*=[^\r\n]*', 'mmtsDumpPath=')
+}
 $backupDirectory = Join-Path $repo 'work\deployment-backups'
 New-Item -ItemType Directory -Path $backupDirectory -Force | Out-Null
 $backup = Join-Path $backupDirectory ('BonDriver_dantto4k.ini.' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.bak')
@@ -63,8 +73,15 @@ New-Item -ItemType Directory -Path $destination -Force | Out-Null
 $files = foreach ($name in $sources.Keys) {
     $source = $sources[$name]
     $target = Join-Path $destination $name
-    Copy-Item -LiteralPath $source -Destination $target
-    $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+    if ($Direct -and !$AutoSelect -and $TunerIndex -eq 1 -and $name -eq 'BonDriver_BDA_4k.ini') {
+        $fixedIni = [IO.File]::ReadAllText($source).Replace('Tuner 0','Tuner 1').Replace('Capture 0','Capture 1')
+        [IO.File]::WriteAllText($target, $fixedIni, [Text.UTF8Encoding]::new($false))
+        if ([IO.File]::ReadAllText($target) -ne $fixedIni) { throw 'Fixed tuner configuration verification failed.' }
+        $sourceHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+    } else {
+        Copy-Item -LiteralPath $source -Destination $target
+        $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+    }
     $targetHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
     if ($sourceHash -ne $targetHash) { throw "Deployment hash mismatch: $name" }
     [pscustomobject]@{ Name = $name; Path = $target; SHA256 = $targetHash }
@@ -105,6 +122,16 @@ if ($Dual) {
     $secondChannels = Join-Path $tvtest ($secondName + '.ch2')
     if ((Test-Path $channels) -and !(Test-Path $secondChannels)) { Copy-Item -LiteralPath $channels -Destination $secondChannels }
 }
+if ($AutoSelect) {
+    # Retain the former second receiver as a recoverable backup, outside the
+    # TVTest BonDriver menu. The second inner directory can remain as fallback.
+    foreach ($extension in 'dll','ini','ch2') {
+        $previous = Join-Path $tvtest ('BonDriver_dantto4k_Tuner1.' + $extension)
+        if (Test-Path -LiteralPath $previous) {
+            Move-Item -LiteralPath $previous -Destination (Join-Path $backupDirectory ('BonDriver_dantto4k_Tuner1.' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.' + $extension + '.bak'))
+        }
+    }
+}
 $manifest = [pscustomobject]@{
     Destination = $destination
     DanttoConfig = $configPath
@@ -113,6 +140,8 @@ $manifest = [pscustomobject]@{
     Backup = $backup
     Direct = [bool]$Direct
     Dual = [bool]$Dual
+    AutoSelect = [bool]$AutoSelect
+    TunerIndex = $(if ($AutoSelect) { $null } else { $TunerIndex })
     SecondWrapper = $(if ($Dual) { $secondWrapper } else { $null })
     DanttoWrapperSource = $DanttoWrapperPath
     Files = @($files)

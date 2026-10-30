@@ -26,18 +26,26 @@ void WriteLog(const std::string& message) {
     std::wstring name(path); const auto dot=name.rfind(L'.'); if(dot!=std::wstring::npos) name.resize(dot); name+=L".log";
     FILE* file=nullptr; _wfopen_s(&file,name.c_str(),L"ab");
     SYSTEMTIME now{}; GetLocalTime(&now);
-    if(file) { fprintf(file,"%02u:%02u:%02u.%03u %s\n",now.wHour,now.wMinute,now.wSecond,now.wMilliseconds,message.c_str()); fclose(file); }
+    if(file) { fprintf(file,"%02u:%02u:%02u.%03u pid=%lu %s\n",now.wHour,now.wMinute,now.wSecond,now.wMilliseconds,GetCurrentProcessId(),message.c_str()); fclose(file); }
     OutputDebugStringA(("TBS6812: "+message+"\n").c_str());
 }
 std::string HResult(HRESULT hr) { std::ostringstream out; out<<"HRESULT=0x"<<std::hex<<std::setw(8)<<std::setfill('0')<<uint32_t(hr); return out.str(); }
 std::wstring Lower(std::wstring value) { std::transform(value.begin(),value.end(),value.begin(),[](wchar_t c){ return wchar_t(towlower(c)); }); return value; }
-int Target(const wchar_t* display,const wchar_t* friendly) {
+int Target(const wchar_t* display,const wchar_t* friendly,const wchar_t* kind=L"tuner") {
     const std::wstring d=Lower(display?display:L""), n=Lower(friendly?friendly:L"");
     if(d.find(L"ven_544d")==d.npos || d.find(L"dev_6178")==d.npos || d.find(L"subsys_00016812")==d.npos ||
         n.find(L"6812")==n.npos || n.size()<7) return -1;
-    if(n.compare(n.size()-7,7,L"tuner 0")==0) return 0;
-    if(n.compare(n.size()-7,7,L"tuner 1")==0) return 1;
+    for(int index=0;index<2;++index) {
+        const auto suffix=std::wstring(kind)+L" "+std::to_wstring(index);
+        if(n.size()>=suffix.size() && n.compare(n.size()-suffix.size(),suffix.size(),suffix)==0) return index;
+    }
     return -1;
+}
+std::wstring BoardPath(const wchar_t* display) {
+    const auto name=Lower(display?display:L"");
+    const auto start=name.find(L"pci#");
+    const auto end=name.find(L"#{",start);
+    return start!=name.npos && end!=name.npos ? name.substr(start,end-start) : L"";
 }
 CComPtr<IKsPropertySet> Properties(IBaseFilter* tuner) {
     CComPtr<IEnumPins> pins;
@@ -206,6 +214,12 @@ public:
 BOOL WINAPI DllMain(HINSTANCE module,DWORD reason,LPVOID) { if(reason==DLL_PROCESS_ATTACH) selfModule=module; return TRUE; }
 extern "C" __declspec(dllexport) HRESULT CheckAndInitTuner(IBaseFilter*,const WCHAR* display,const WCHAR* friendly,const WCHAR*) {
     return Target(display,friendly)>=0?S_OK:E_INVALIDARG;
+}
+extern "C" __declspec(dllexport) HRESULT CheckCapture(const WCHAR* tunerDisplay,const WCHAR* tunerFriendly,const WCHAR* captureDisplay,const WCHAR* captureFriendly,const WCHAR*) {
+    const int index=Target(tunerDisplay,tunerFriendly);
+    const auto board=BoardPath(tunerDisplay);
+    return index>=0 && Target(captureDisplay,captureFriendly,L"capture")==index &&
+        !board.empty() && board==BoardPath(captureDisplay) ? S_OK : E_INVALIDARG;
 }
 extern "C" __declspec(dllexport) IBdaSpecials* CreateBdaSpecials2(CComPtr<IBaseFilter> tuner,CComPtr<IBaseFilter>,const WCHAR* display,const WCHAR* friendly,const WCHAR*,const WCHAR*) {
     try { return new Specials(tuner,Target(display,friendly),display); } catch(...) { return nullptr; }
