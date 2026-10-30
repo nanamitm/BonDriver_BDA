@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "Cxd2857.h"
+#include "WarmStartCache.h"
+#include <chrono>
 #include <iostream>
 #include <map>
 #include <stdexcept>
@@ -69,7 +71,40 @@ int main() {
         Require(sawSecond,"second tuner uses address 0x61");
         rejected=false; try { Cxd2857 invalid(second,2); } catch(...) { rejected=true; }
         Require(rejected,"invalid tuner index rejected");
-        std::cout<<"PASS: IF/ID validation, 8K path, warm restore, partial I2C failure, monitor cleanup, chip identity, independent RF addresses\n";
+        FakeBus reusable; Cxd2857 reusableChip(reusable); reusableChip.AdoptCached(1164560,0xb070);
+        Require(reusableChip.Adopted(),"locked prepared state can be adopted");
+        for(int kind=0;kind<9;++kind) {
+            FakeBus stale;
+            if(kind==0) stale.registers[{0x64,0xa0,0x11}]=0;
+            if(kind==1) stale.registers[{0x66,0,0x10}]=1;
+            if(kind==2) stale.registers[{0x64,0,0x81}]=0xff;
+            if(kind==3) stale.registers[{0x64,1,0xc0}]=1;
+            if(kind==4) stale.registers[{0x66,0,0x17}]=0x0c;
+            if(kind==5) stale.registers[{0x66,0,0x14}]=0;
+            if(kind==6) stale.registers[{0x64,0,0xc4}]=0x80;
+            if(kind==7) stale.registers[{0x64,0,0xa9}]=0;
+            if(kind==8) stale.registers[{0x64,0xd0,0x88}]=0x71;
+            Cxd2857 staleChip(stale); rejected=false;
+            try { staleChip.AdoptCached(1164560,0xb070); } catch(...) { rejected=true; }
+            Require(rejected && !staleChip.Adopted(),"inactive cached state rejected before adoption");
+            for(const auto& w:stale.writes) Require(w.first!=0x60 && w.first!=0x61,"rejected cached state does not write RF");
+        }
+        const auto path=std::filesystem::temp_directory_path()/("tbs6812-cache-test-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".state");
+        struct Cleanup { std::filesystem::path path; ~Cleanup(){std::error_code error;std::filesystem::remove(path,error);} } cleanup{path};
+        Require(!ReadWarmRecord(path,17),"missing cache rejected");
+        WriteWarmRecord(path,17,{1164560,0xb070});
+        const auto saved=ReadWarmRecord(path,17);
+        Require(saved && saved->frequencyKHz==1164560 && saved->streamID==0xb070,"cache round trip");
+        Require(!ReadWarmRecord(path,18),"different device cache rejected");
+        WriteWarmRecord(path,17,{1,0xb070}); Require(!ReadWarmRecord(path,17),"invalid cached IF rejected");
+        WriteWarmRecord(path,17,{1164560,0x4010}); Require(!ReadWarmRecord(path,17),"invalid cached stream rejected");
+        { std::ofstream corrupt(path); corrupt<<"TBS6812-WARM-1 17 1164560 45168 0\n"; }
+        Require(!ReadWarmRecord(path,17),"corrupt cache checksum rejected");
+        { std::ofstream malformed(path); malformed<<"not-a-cache\n"; }
+        Require(!ReadWarmRecord(path,17),"malformed cache rejected");
+        { std::ofstream oversized(path); oversized<<std::string(300,'x'); }
+        Require(!ReadWarmRecord(path,17),"oversized cache rejected");
+        std::cout<<"PASS: IF/ID validation, warm restore, I2C failures, independent RF addresses, cached hardware guards, cache validation\n";
         return 0;
     } catch(const std::exception& e) { std::cerr<<"FAIL: "<<e.what()<<'\n'; return 1; }
 }

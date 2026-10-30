@@ -2,6 +2,7 @@
 #pragma once
 #include <cstdint>
 #include <vector>
+#include <string>
 
 namespace tbs6812 {
 using Bytes = std::vector<uint8_t>;
@@ -21,6 +22,8 @@ public:
     bool Locked();
     float CNR();
     bool Adopted() const { return adopted_; }
+    std::string InspectWarmState();
+    void AdoptCached(uint32_t frequencyKHz, uint16_t streamID);
     static uint32_t IntermediateFrequency(long rfKHz, long oscillatorKHz);
     static bool IsS3(long streamID);
 private:

@@ -15,6 +15,7 @@
 #include <string>
 #include "IBdaSpecials2.h"
 #include "Cxd2857.h"
+#include "WarmStartCache.h"
 
 namespace {
 const GUID accessSet = {0xfaa8f3e5,0x31d4,0x4e41,{0x88,0xef,0xd9,0xeb,0x71,0x6f,0x6e,0xc9}};
@@ -93,10 +94,40 @@ class Specials final : public IBdaSpecials2b5 {
     int tunerIndex_;
     std::wstring identity_;
     bool fatal_=false, bootstrapPending_=false, finalized_=false;
+    bool inspectWarm_=false;
+    bool warmStart_=false;
+    std::wstring cacheDirectory_,cachePath_;
+    uint64_t deviceHash_=0;
+    std::optional<tbs6812::WarmStartRecord> originalRecord_;
     DWORD lockTimeout_=3000;
     TuningParam bootstrap_;
     HANDLE claim_=nullptr;
     void Log(const std::string& message) const { WriteLog("tuner="+std::to_string(tunerIndex_)+" "+message); }
+    void Inspect(const char* stage) {
+        if(!inspectWarm_ || !chip_) return;
+        try { Log(std::string(stage)+": "+chip_->InspectWarmState()); }
+        catch(const std::exception& e) { Log(std::string(stage)+": inspection failed: "+e.what()); }
+    }
+    void ConsumeCache() {
+        if(!cachePath_.empty() && !DeleteFileW(cachePath_.c_str()) && GetLastError()!=ERROR_FILE_NOT_FOUND)
+            throw std::runtime_error("cannot invalidate the experimental warm-start record");
+    }
+    void SaveCache() {
+        if(cachePath_.empty() || !originalRecord_) return;
+        const auto start=std::chrono::steady_clock::now();
+        while(!chip_->Locked()) {
+            if(std::chrono::steady_clock::now()-start>=std::chrono::milliseconds(lockTimeout_)) {
+                Log("warm-cache not saved: restored carrier did not lock");
+                return;
+            }
+            Sleep(5);
+        }
+        const auto temporary=cachePath_+L".tmp";
+        tbs6812::WriteWarmRecord(temporary,deviceHash_,*originalRecord_);
+        if(!MoveFileExW(temporary.c_str(),cachePath_.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
+            throw std::runtime_error("cannot publish the experimental warm-start record");
+        Log("warm-cache published after locked restoration; wait_ms="+std::to_string(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()));
+    }
     static uint32_t IF(const TuningParam& p) { return tbs6812::Cxd2857::IntermediateFrequency(p.Frequency,p.Antenna.LowOscillator); }
     bool Supported(const TuningParam* p) {
         return p && tbs6812::Cxd2857::IsS3(p->TSID) && (p->Polarisation==BDA_POLARISATION_CIRCULAR_R || p->Polarisation==BDA_POLARISATION_CIRCULAR_L) && p->Antenna.Tone==0 && p->Antenna.DiSEqC<=0;
@@ -107,6 +138,11 @@ public:
     ~Specials() { if(claim_) CloseHandle(claim_); }
     const HRESULT ReadIniFile(const WCHAR* path) override {
         lockTimeout_=std::clamp<DWORD>(GetPrivateProfileIntW(L"TBS6812",L"LockTimeoutMs",3000,path),100,10000);
+        inspectWarm_=GetPrivateProfileIntW(L"TBS6812",L"InspectWarmState",0,path)!=0;
+        warmStart_=GetPrivateProfileIntW(L"TBS6812",L"ExperimentalWarmStart",0,path)!=0;
+        wchar_t directory[MAX_PATH]{};
+        GetPrivateProfileStringW(L"TBS6812",L"WarmStartCacheDirectory",L"",directory,MAX_PATH,path);
+        cacheDirectory_=directory;
         return S_OK;
     }
     const HRESULT InitializeHook() override {
@@ -116,6 +152,7 @@ public:
             // Stable device-path hash keeps claims independent across slots and cards.
             uint64_t hash=14695981039346656037ULL;
             for(wchar_t c:identity_) { hash^=uint16_t(c); hash*=1099511628211ULL; }
+            deviceHash_=hash;
             const auto name=L"Local\\BonDriver_TBS6812_Direct_"+std::to_wstring(hash)+L"_"+std::to_wstring(tunerIndex_);
             claim_=CreateMutexW(nullptr,FALSE,name.c_str());
             if(!claim_ || GetLastError()==ERROR_ALREADY_EXISTS) throw std::runtime_error("this tuner direct-control extension is already open");
@@ -128,7 +165,13 @@ public:
             if(FAILED(hr)) throw std::runtime_error("read tuner modes: "+HResult(hr));
             if(returned<=DWORD(tunerIndex_)) throw std::runtime_error("tuner mode property returned a truncated slot array");
             if(modes[tunerIndex_]!=2) throw std::runtime_error("selected tuner must already be in satellite mode; no card-wide mode changes are performed");
-            Log("initialized: warm ISDB-S3 takeover; vendor bootstrap required");
+            Log(warmStart_ ? "initialized: experimental cached warm start; vendor fallback available" : "initialized: warm ISDB-S3 takeover; vendor bootstrap required");
+            if(warmStart_) {
+                if(cacheDirectory_.empty() || !std::filesystem::path(cacheDirectory_).is_absolute()) throw std::runtime_error("experimental warm start requires an absolute cache directory");
+                std::filesystem::create_directories(cacheDirectory_);
+                cachePath_=(std::filesystem::path(cacheDirectory_)/(std::to_wstring(hash)+L"_"+std::to_wstring(tunerIndex_)+L".state")).wstring();
+            }
+            Inspect("opened-before-vendor");
             return S_OK;
         } catch(const std::exception& e) { fatal_=true; return Error("initialize",e); }
     }
@@ -152,6 +195,22 @@ public:
         if(!Supported(p)) { Log("rejected: this extension accepts circular ISDB-S3 channels with tone off only"); return E_INVALIDARG; }
         try {
             const auto frequency=IF(*p);
+            if(!chip_->Adopted()) {
+                if(!cachePath_.empty()) {
+                    const auto cached=tbs6812::ReadWarmRecord(cachePath_,deviceHash_);
+                    ConsumeCache(); // A crash from this point cannot reuse stale state.
+                    if(cached) {
+                        try {
+                            chip_->AdoptCached(cached->frequencyKHz,cached->streamID);
+                            originalRecord_=cached;
+                            Log("warm-cache adopted: skipping vendor TuneRequest");
+                        } catch(const std::exception& e) {
+                            Log(std::string("warm-cache rejected: ")+e.what());
+                            chip_=std::make_unique<tbs6812::Cxd2857>(*bus_,unsigned(tunerIndex_));
+                        }
+                    } else { Log("warm-cache absent/invalid: vendor bootstrap required"); }
+                }
+            }
             if(!chip_->Adopted()) {
                 bootstrap_=*p; bootstrapPending_=true;
                 const HRESULT hr=SetLNBPower(true); if(FAILED(hr)) throw std::runtime_error("LNB preparation failed: "+HResult(hr));
@@ -178,6 +237,8 @@ public:
         try {
             if(!chip_->Locked()) throw std::runtime_error("initial vendor tune did not lock; close/reopen before retrying");
             chip_->Adopt(IF(bootstrap_),uint16_t(bootstrap_.TSID));
+            originalRecord_=tbs6812::WarmStartRecord{IF(bootstrap_),uint16_t(bootstrap_.TSID)};
+            Inspect("after-vendor");
             Log("bootstrap adopted: CXD2857ER already active; no chip reset or clock reinitialization");
             return S_OK;
         } catch(const std::exception& e) { fatal_=true; return Error("bootstrap adoption",e); }
@@ -203,7 +264,7 @@ public:
         std::lock_guard<std::mutex> guard(mutex_);
         if(finalized_) return S_OK;
         finalized_=true;
-        try { if(chip_) chip_->Restore(); Log("closed: bootstrap tuning and original output-pin settings restored; no board-mode write"); return S_OK; }
+        try { if(chip_) chip_->Restore(); Inspect("after-restore"); if(!fatal_) SaveCache(); Log("closed: bootstrap tuning and original output-pin settings restored; no board-mode write"); return S_OK; }
         catch(const std::exception& e) { return Error("restore vendor state",e); }
     }
     void Release() override { delete this; }

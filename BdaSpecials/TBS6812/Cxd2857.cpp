@@ -6,6 +6,7 @@
 #include <chrono>
 #include <stdexcept>
 #include <thread>
+#include <sstream>
 
 namespace tbs6812 {
 constexpr uint8_t SLVT = 0x64, SLVX = 0x66;
@@ -61,6 +62,16 @@ void Cxd2857::TuneRF(uint32_t frequency) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     Tuner(5, {0}); Tuner(4, {0xc0});
 }
+void Cxd2857::AdoptCached(uint32_t frequency, uint16_t streamID) {
+    if(!Locked()) throw std::runtime_error("cached hardware is not locked");
+    Set(SLVX,0,0);
+    if(bus_.Read(SLVX,0x10,1)[0]!=0) throw std::runtime_error("cached demodulator is not active");
+    Bank(0);
+    if(bus_.Read(SLVT,0x81,1)[0]!=0) throw std::runtime_error("cached data pins are disabled");
+    Bank(1);
+    if(bus_.Read(SLVT,0xc0,1)[0]!=0) throw std::runtime_error("cached TLV output is disabled");
+    Adopt(frequency,streamID);
+}
 void Cxd2857::Acquire(const Bytes& stream, uint32_t frequency) {
     Bank(1); Set(SLVT, 0xc0, 1); // stop TLV while retuning
     Bank(0xd0); Put(SLVT, 0x87, stream);
@@ -85,6 +96,29 @@ void Cxd2857::Restore() {
 }
 bool Cxd2857::Locked() {
     Bank(0xa0); return (bus_.Read(SLVT, 0x10, 2)[1] & 0x40) != 0;
+}
+std::string Cxd2857::InspectWarmState() {
+    std::ostringstream result;
+    const auto show = [&](const char* name, uint8_t address, uint8_t reg, size_t length) {
+        result << name << '=';
+        for(uint8_t value : bus_.Read(address, reg, length)) result << std::hex << unsigned(value) << ',';
+        result << ' ';
+    };
+    Set(SLVX,0,0);
+    show("id",SLVX,0xfb,3); show("clock/core",SLVX,0x14,4); show("x10",SLVX,0x10,1);
+    Bank(0); show("tlv",SLVT,0xa9,1); show("serial",SLVT,0xc4,1); show("pins",SLVT,0x81,1);
+    Bank(1); show("output",SLVT,0xc0,1);
+    Bank(0xd0); show("stream",SLVT,0x87,2);
+    Bank(0xa0); show("lock",SLVT,0x10,2);
+    const uint8_t repeater=bus_.Read(SLVX,8,1)[0];
+    Set(SLVX,8,repeater|1);
+    try {
+        show("rf01",tunerAddress_,1,1); show("rf04",tunerAddress_,4,2);
+        show("rf0c",tunerAddress_,0x0c,10); show("rf1a",tunerAddress_,0x1a,1);
+        show("rf45",tunerAddress_,0x45,1); show("rf81",tunerAddress_,0x81,4);
+    } catch(...) { Set(SLVX,8,repeater); Bank(0); throw; }
+    Set(SLVX,8,repeater); Bank(0);
+    return result.str();
 }
 float Cxd2857::CNR() {
     Bank(0); Set(SLVT, 1, 1);
