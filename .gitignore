@@ -1,0 +1,12 @@
+/work/
+/Lib/
+/x64/
+/Win32/
+/BonDriver_BDA/x64/
+/BonDriver_BDA/Win32/
+/BdaSpecials/*/x64/
+/BdaSpecials/*/Win32/
+/projects/*/x64/
+/projects/*/Win32/
+*.vcxproj.user
+.vs/
