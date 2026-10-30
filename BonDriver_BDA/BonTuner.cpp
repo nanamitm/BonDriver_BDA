@@ -9,6 +9,7 @@
 #include <Windows.h>
 #include <string>
 #include <regex>
+#include <chrono>
 
 #include <rpc.h>
 
@@ -683,14 +684,18 @@ const BOOL CBonTuner::_SetChannel(const DWORD dwSpace, const DWORD dwChannel)
 	m_LastTuningParam.IniChannelID = dwChannel;													// iniファイルで読込まれたチャンネル番号
 
 	// IBdaSpecialsで事前の処理が必要なら行う
-	if (m_pIBdaSpecials2)
+	if (m_pIBdaSpecials2) {
 		hr = m_pIBdaSpecials2->PreLockChannel(&m_LastTuningParam);
+		if (FAILED(hr) && hr != E_NOINTERFACE) return FALSE;
+	}
 
 	BOOL bRet = LockChannel(&m_LastTuningParam, m_bLockTwice && Ch->LockTwiceTarget);
 
 	// IBdaSpecialsで追加の処理が必要なら行う
-	if (m_pIBdaSpecials2)
+	if (m_pIBdaSpecials2) {
 		hr = m_pIBdaSpecials2->PostLockChannel(&m_LastTuningParam);
+		if (FAILED(hr) && hr != E_NOINTERFACE) bRet = FALSE;
+	}
 
 	SleepWithMessageLoop(100);
 	PurgeTsStream();
@@ -3141,6 +3146,13 @@ void CBonTuner::GetSignalState(int* pnStrength, int* pnQuality, int* pnLock)
 BOOL CBonTuner::LockChannel(const TuningParam *pTuningParam, BOOL bLockTwice)
 {
 	HRESULT hr;
+	using TuneClock = std::chrono::steady_clock;
+	const auto tuneBegin = TuneClock::now();
+	const auto milliseconds = [](TuneClock::time_point start) {
+		return std::chrono::duration<double, std::milli>(TuneClock::now() - start).count();
+	};
+	OutputDebug(L"[TuneTiming] begin RF_kHz=%ld TSID=0x%lx tone=%ld previous_tone=%ld\n",
+		pTuningParam->Frequency, pTuningParam->TSID, pTuningParam->Antenna.Tone, m_nCurTone);
 
 	// チューナ固有 LockChannel があれば、丸投げ
 	if (m_pIBdaSpecials2 && (hr = m_pIBdaSpecials2->LockChannel(pTuningParam)) != E_NOINTERFACE) {
@@ -3418,16 +3430,27 @@ BOOL CBonTuner::LockChannel(const TuningParam *pTuningParam, BOOL bLockTwice)
 
 	if (m_pIBdaSpecials2) {
 		// チューナ固有のTSID関数があれば呼び出す
+		OutputDebug(L"[TuneTiming] setup elapsed_ms=%.3f\n", milliseconds(tuneBegin));
+		const auto tsidBegin = TuneClock::now();
 		hr = m_pIBdaSpecials2->SetTSid(pTuningParam->TSID);
+		OutputDebug(L"[TuneTiming] set_tsid elapsed_ms=%.3f hr=0x%08lx\n", milliseconds(tsidBegin), hr);
 
 		// m_pIBdaSpecialsでput_TuneRequestの前に何らかの処理が必要なら行う
+		const auto preHookBegin = TuneClock::now();
 		hr = m_pIBdaSpecials2->PreTuneRequest(pTuningParam, pITuneRequest);
+		OutputDebug(L"[TuneTiming] pre_hook elapsed_ms=%.3f hr=0x%08lx\n", milliseconds(preHookBegin), hr);
 	}
 
+	const auto requestTune = [&](const wchar_t* stage) {
+		const auto requestBegin = TuneClock::now();
+		const HRESULT result = m_pITuner->put_TuneRequest(pITuneRequest);
+		OutputDebug(L"[TuneTiming] %s elapsed_ms=%.3f hr=0x%08lx\n", stage, milliseconds(requestBegin), result);
+		return result;
+	};
 	if (pTuningParam->Antenna.Tone != m_nCurTone && m_nToneWait) {
 		//トーン切替ありの場合、先に一度TuneRequestしておく
 		OutputDebug(L"  Requesting pre tune.\n");
-		if (FAILED(hr = m_pITuner->put_TuneRequest(pITuneRequest))) {
+		if (FAILED(hr = requestTune(L"pre_tune"))) {
 			OutputDebug(L"  Fail to put pre tune request.  hr=0x%08lx\n", hr);
 			return FALSE;
 		}
@@ -3444,7 +3467,7 @@ BOOL CBonTuner::LockChannel(const TuningParam *pTuningParam, BOOL bLockTwice)
 	if (bLockTwice) {
 		// TuneRequestを強制的に2度行う
 		OutputDebug(L"  Requesting 1st twice tune.\n");
-		if (FAILED(hr = m_pITuner->put_TuneRequest(pITuneRequest))) {
+		if (FAILED(hr = requestTune(L"twice_tune"))) {
 			OutputDebug(L"  Fail to put 1st twice tune request. hr=0x%08lx\n", hr);
 			return FALSE;
 		}
@@ -3460,7 +3483,7 @@ BOOL CBonTuner::LockChannel(const TuningParam *pTuningParam, BOOL bLockTwice)
 	int nLock = 0;
 	do {
 		OutputDebug(L"  Requesting tune.\n");
-		if (FAILED(hr = m_pITuner->put_TuneRequest(pITuneRequest))) {
+		if (FAILED(hr = requestTune(L"main_tune"))) {
 			OutputDebug(L"  Fail to put tune request. hr=0x%08lx\n", hr);
 			return FALSE;
 		}
@@ -3472,6 +3495,7 @@ BOOL CBonTuner::LockChannel(const TuningParam *pTuningParam, BOOL bLockTwice)
 
 		static constexpr int LockRetryTime = 50;
 		unsigned int nWaitRemain = m_nLockWait;
+		const auto waitBegin = TuneClock::now();
 		SleepWithMessageLoop(m_nLockWaitDelay);
 		GetSignalState(NULL, NULL, &nLock);
 		while (!nLock && nWaitRemain) {
@@ -3481,7 +3505,9 @@ BOOL CBonTuner::LockChannel(const TuningParam *pTuningParam, BOOL bLockTwice)
 			nWaitRemain -= dwSleepTime;
 			GetSignalState(NULL, NULL, &nLock);
 		}
+		OutputDebug(L"[TuneTiming] lock_wait elapsed_ms=%.3f lock=%d\n", milliseconds(waitBegin), nLock);
 	} while (!nLock && nRetryRemain--);
+	OutputDebug(L"[TuneTiming] vendor_path_total elapsed_ms=%.3f\n", milliseconds(tuneBegin));
 
 	if (nLock != 0)
 		OutputDebug(L"  LockChannel success.\n");
