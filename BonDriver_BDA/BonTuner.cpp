@@ -683,14 +683,18 @@ const BOOL CBonTuner::_SetChannel(const DWORD dwSpace, const DWORD dwChannel)
 	m_LastTuningParam.IniChannelID = dwChannel;													// iniファイルで読込まれたチャンネル番号
 
 	// IBdaSpecialsで事前の処理が必要なら行う
-	if (m_pIBdaSpecials2)
+	if (m_pIBdaSpecials2) {
 		hr = m_pIBdaSpecials2->PreLockChannel(&m_LastTuningParam);
+		if (FAILED(hr) && hr != E_NOINTERFACE) return FALSE;
+	}
 
 	BOOL bRet = LockChannel(&m_LastTuningParam, m_bLockTwice && Ch->LockTwiceTarget);
 
 	// IBdaSpecialsで追加の処理が必要なら行う
-	if (m_pIBdaSpecials2)
+	if (m_pIBdaSpecials2) {
 		hr = m_pIBdaSpecials2->PostLockChannel(&m_LastTuningParam);
+		if (FAILED(hr) && hr != E_NOINTERFACE) bRet = FALSE;
+	}
 
 	SleepWithMessageLoop(100);
 	PurgeTsStream();
