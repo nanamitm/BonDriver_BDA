@@ -159,6 +159,10 @@ actual stream IDs in addition to successful API return values.
 
 ## Hardware checks
 
+Outstanding ISDB-S3 validation and improvements are tracked in
+[tbs6812-isdb-s3-todo.md](tbs6812-isdb-s3-todo.md). The user has confirmed
+two-window TVTest live display and viewing with the shared auto-allocation build.
+
 The probe accepts comma-separated channel names and keeps one tuner open:
 
 ```powershell
