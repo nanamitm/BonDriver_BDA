@@ -66,6 +66,9 @@ int wmain(int argc, wchar_t** argv) {
         output.close(); std::cout<<"bytes="<<total<<" non_ff_bytes="<<nonFF<<" signal="<<driver->GetSignalLevel()<<std::endl;
         if(!tuned || !total || !nonFF) { success=false; break; }
     }
-    driver->CloseTuner(); driver->Release(); FreeLibrary(module);
+    std::cout<<"close_begin"<<std::endl;
+    driver->CloseTuner(); std::cout<<"close_done"<<std::endl;
+    driver->Release(); std::cout<<"release_done"<<std::endl;
+    FreeLibrary(module); std::cout<<"unload_done"<<std::endl;
     return success?0:9;
 }
