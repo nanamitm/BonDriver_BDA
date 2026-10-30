@@ -1,10 +1,12 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$TVTestDirectory,
-    [string]$Subdirectory = '4k8kdrver-built'
+    [string]$Subdirectory = '4k8kdrver-built',
+    [switch]$Direct
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
+if ($Direct -and !$PSBoundParameters.ContainsKey('Subdirectory')) { $Subdirectory = '4k8kdrver-direct' }
 $tvtest = (Resolve-Path -LiteralPath $TVTestDirectory).Path
 $running = Get-CimInstance Win32_Process | Where-Object {
     $_.ExecutablePath -eq (Join-Path $tvtest 'TVTest.exe')
@@ -19,6 +21,13 @@ $sources = @{
     'BonDriver_BDA_4k.dll' = Join-Path $artifacts 'BonDriver_BDA.dll'
     'TBS.dll' = Join-Path $artifacts 'TBS.dll'
     'BonDriver_BDA_4k.ini' = Join-Path $repo 'config\BonDriver_BDA_4k.ini'
+}
+if ($Direct) {
+    $sources.Remove('TBS.dll')
+    $sources['TBS6812.dll'] = Join-Path $artifacts 'TBS6812.dll'
+    $sources['BonDriver_BDA_4k.ini'] = Join-Path $repo 'config\BonDriver_BDA_4k_direct.ini'
+    $sources['COPYING-TBS6812.txt'] = Join-Path $repo 'BdaSpecials\TBS6812\COPYING'
+    $sources['NOTICE-TBS6812.md'] = Join-Path $repo 'BdaSpecials\TBS6812\NOTICE.md'
 }
 foreach ($source in $sources.Values) {
     if (!(Test-Path -LiteralPath $source)) { throw "Missing build/configuration: $source" }
@@ -61,6 +70,7 @@ $manifest = [pscustomobject]@{
     OriginalSetting = $settingMatches[0].Value
     UpdatedSetting = 'bondriverPath=' + $relative
     Backup = $backup
+    Direct = [bool]$Direct
     Files = @($files)
 }
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $repo 'work\deployment.json') -Encoding utf8
