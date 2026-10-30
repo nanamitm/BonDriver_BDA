@@ -1,20 +1,21 @@
-# TBS6812.dll: warm ISDB-S / ISDB-S3 direct control
+# TBS6812.dll: warm ISDB-T / ISDB-S / ISDB-S3 direct control
 
 This extension replaces per-channel vendor BDA tuning with raw I2C through
 property 0x19. It supports **TBS6812 Tuner 0/1 with matching Capture 0/1,
-ISDB-S and ISDB-S3**, including two simultaneous receiver processes.
+ISDB-T (6 MHz), ISDB-S and ISDB-S3**, including two simultaneous receiver processes.
 The shared-driver configuration can automatically claim an available slot.
 The vendor Windows driver and the BonDriver_BDA capture graph remain in use.
 The existing dantto4k DLL remains responsible for S3 conditional access and TS remux.
-Conventional ISDB-S emits 188-byte TS directly; see [ISDB-S setup](tbs6812-isdb-s.md).
+Conventional ISDB-S and ISDB-T emit 188-byte TS directly; see
+[ISDB-S setup](tbs6812-isdb-s.md) and [ISDB-T setup and mode constraints](tbs6812-isdb-t.md).
 
 ## Lifecycle
 
-1. Validate the PCI model, tuner number, raw-I2C property and satellite mode.
+1. Validate the PCI model, tuner number, raw-I2C property and the matching terrestrial/satellite board mode.
    An incompatible card/tuner is rejected, not silently used through another path.
 2. The first `LockChannel` returns `E_NOINTERFACE` so BonDriver_BDA prepares the
    board with its normal vendor tune. Only this initial tune takes the slow path.
-3. `PostLockChannel` checks lock, chip ID 0x091, the 24 MHz clock and the configured S/TS or S3/TLV
+3. `PostLockChannel` checks lock, chip ID 0x091, the 24 MHz clock and the configured T/TS, S/TS or S3/TLV
    mode before adopting the chip. It saves the initial IF, stream ID and output
    settings. A failed preparation requires close/reopen.
 4. Later tunes pause TS/TLV output, set the stream ID and Freia RF frequency, request
@@ -42,7 +43,9 @@ Right/left Japanese BS carriers are distinguished by their downconverted IF:
 950..3224 MHz. Frequencies above 2150 MHz use the Freia high-frequency path.
 Requests to enable continuous tone or use a DiSEqC switch are rejected in this first version.
 ISDB-S uses 950..2150 MHz IF and its own RF filters, TS output, TSID and monitors.
-Terrestrial reception is not supported by this extension.
+ISDB-T uses RF 90..770 MHz with a fixed 6 MHz bandwidth and no LNB/TSID writes.
+Terrestrial and satellite board modes must be configured before opening; the DLL
+does not restart the whole card to switch them. See the ISDB-T setup above.
 
 ## Build and unit checks
 
