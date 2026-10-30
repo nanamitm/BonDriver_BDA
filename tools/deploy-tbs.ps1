@@ -2,9 +2,13 @@
 param(
     [Parameter(Mandatory)][string]$TVTestDirectory,
     [string]$Subdirectory = '4k8kdrver-built',
-    [switch]$Direct
+    [switch]$Direct,
+    [switch]$Dual,
+    [string]$DanttoWrapperPath
 )
 $ErrorActionPreference = 'Stop'
+if ($Dual -and !$Direct) { throw '-Dual requires -Direct.' }
+if ($DanttoWrapperPath) { $DanttoWrapperPath = (Resolve-Path -LiteralPath $DanttoWrapperPath).Path }
 $repo = Split-Path $PSScriptRoot -Parent
 if ($Direct -and !$PSBoundParameters.ContainsKey('Subdirectory')) { $Subdirectory = '4k8kdrver-direct' }
 $tvtest = (Resolve-Path -LiteralPath $TVTestDirectory).Path
@@ -49,6 +53,12 @@ $backupDirectory = Join-Path $repo 'work\deployment-backups'
 New-Item -ItemType Directory -Path $backupDirectory -Force | Out-Null
 $backup = Join-Path $backupDirectory ('BonDriver_dantto4k.ini.' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.bak')
 [IO.File]::WriteAllBytes($backup, $originalBytes)
+if ($DanttoWrapperPath) {
+    $outer = Join-Path $tvtest 'BonDriver_dantto4k.dll'
+    Copy-Item -LiteralPath $outer -Destination (Join-Path $backupDirectory ('BonDriver_dantto4k.' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.dll.bak'))
+    Copy-Item -LiteralPath $DanttoWrapperPath -Destination $outer
+    if ((Get-FileHash $outer).Hash -ne (Get-FileHash $DanttoWrapperPath).Hash) { throw 'Updated dantto4k wrapper hash mismatch.' }
+}
 New-Item -ItemType Directory -Path $destination -Force | Out-Null
 $files = foreach ($name in $sources.Keys) {
     $source = $sources[$name]
@@ -64,6 +74,37 @@ if ([IO.File]::ReadAllText($configPath, $encoding) -notmatch [regex]::Escape('bo
     [IO.File]::WriteAllBytes($configPath, $originalBytes)
     throw 'Configuration verification failed; original bytes were restored.'
 }
+if ($Dual) {
+    $secondDirectory = $destination + '-tuner1'
+    New-Item -ItemType Directory -Path $secondDirectory -Force | Out-Null
+    foreach ($name in $sources.Keys) {
+        $target = Join-Path $secondDirectory $name
+        if ($name -eq 'BonDriver_BDA_4k.ini') {
+            $secondIni = [IO.File]::ReadAllText($sources[$name]).Replace('Tuner 0','Tuner 1').Replace('Capture 0','Capture 1')
+            [IO.File]::WriteAllText($target, $secondIni, [Text.UTF8Encoding]::new($false))
+            if ([IO.File]::ReadAllText($target) -ne $secondIni) { throw 'Tuner 1 configuration verification failed.' }
+        } else {
+            Copy-Item -LiteralPath $sources[$name] -Destination $target
+            if ((Get-FileHash $target).Hash -ne (Get-FileHash $sources[$name]).Hash) { throw "Tuner 1 hash mismatch: $name" }
+        }
+    }
+    $secondName = 'BonDriver_dantto4k_Tuner1'
+    $secondWrapper = Join-Path $tvtest ($secondName + '.dll')
+    Copy-Item -LiteralPath (Join-Path $tvtest 'BonDriver_dantto4k.dll') -Destination $secondWrapper
+    if ((Get-FileHash $secondWrapper).Hash -ne (Get-FileHash (Join-Path $tvtest 'BonDriver_dantto4k.dll')).Hash) { throw 'Tuner 1 wrapper hash mismatch.' }
+    $secondRelative = '.\' + $Subdirectory + '-tuner1\BonDriver_BDA_4k.dll'
+    $secondText = [regex]::Replace($updated, $pattern, [Text.RegularExpressions.MatchEvaluator]{ param($match) 'bondriverPath=' + $secondRelative })
+    # Separate instances must never write the same optional MMTS dump file.
+    $secondText = [regex]::Replace($secondText, '(?m)^[ \t]*mmtsDumpPath[ \t]*=[^\r\n]*', 'mmtsDumpPath=')
+    $secondConfig = Join-Path $tvtest ($secondName + '.ini')
+    if (Test-Path $secondConfig) {
+        Copy-Item -LiteralPath $secondConfig -Destination (Join-Path $backupDirectory ($secondName + '.' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.ini.bak'))
+    }
+    [IO.File]::WriteAllBytes($secondConfig, $encoding.GetBytes($secondText))
+    $channels = Join-Path $tvtest 'BonDriver_dantto4k.ch2'
+    $secondChannels = Join-Path $tvtest ($secondName + '.ch2')
+    if ((Test-Path $channels) -and !(Test-Path $secondChannels)) { Copy-Item -LiteralPath $channels -Destination $secondChannels }
+}
 $manifest = [pscustomobject]@{
     Destination = $destination
     DanttoConfig = $configPath
@@ -71,6 +112,9 @@ $manifest = [pscustomobject]@{
     UpdatedSetting = 'bondriverPath=' + $relative
     Backup = $backup
     Direct = [bool]$Direct
+    Dual = [bool]$Dual
+    SecondWrapper = $(if ($Dual) { $secondWrapper } else { $null })
+    DanttoWrapperSource = $DanttoWrapperPath
     Files = @($files)
 }
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $repo 'work\deployment.json') -Encoding utf8

@@ -14,7 +14,7 @@ struct I2cBus {
 // Warm ISDB-S3 takeover only. No reset, clock, board-mode or shared-GPIO writes.
 class Cxd2857 {
 public:
-    explicit Cxd2857(I2cBus& bus) : bus_(bus) {}
+    explicit Cxd2857(I2cBus& bus, unsigned tunerIndex = 0);
     void Adopt(uint32_t frequencyKHz, uint16_t expectedStreamID);
     void Tune(uint32_t frequencyKHz, uint16_t streamID);
     void Restore();
@@ -25,6 +25,7 @@ public:
     static bool IsS3(long streamID);
 private:
     I2cBus& bus_;
+    uint8_t tunerAddress_;
     bool adopted_ = false, dirty_ = false;
     uint32_t originalFrequency_ = 0;
     Bytes originalStream_;

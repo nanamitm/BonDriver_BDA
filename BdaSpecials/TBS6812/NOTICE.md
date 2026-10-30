@@ -7,6 +7,8 @@ are adapted from Till0196/coax, commit 2ef4838227f5c8f968f9acd74161c0437a165dc6:
 - internal/coaxd/demod/cxd2857er/cn.go
 - internal/coaxd/demod/cxd2857er/status.go
 - internal/coaxd/demod/sony/chip.go
+- internal/coaxd/pcie/tbs/tbs_windows.go (per-slot tuner addresses)
+- internal/coaxd/demod/cxd2857er/tuner.go (shared reference clock constraints)
 
 https://github.com/Till0196/coax/tree/2ef4838227f5c8f968f9acd74161c0437a165dc6
 

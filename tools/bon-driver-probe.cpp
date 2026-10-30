@@ -1,5 +1,6 @@
 #define NOMINMAX
 #include <windows.h>
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -53,15 +54,25 @@ int wmain(int argc, wchar_t** argv) {
         if(!output) { success=false; break; }
         const auto deadline=Clock::now()+std::chrono::seconds(std::stoi(argv[3]));
         unsigned long long total=0,nonFF=0;
+        auto lastData=Clock::now(),windowStart=lastData;
+        unsigned long long windowBytes=0;
+        double maxGap=0;
         while(Clock::now()<deadline) {
             driver->WaitTsStream(100); DWORD remain=0;
             do {
                 BYTE* data=nullptr; DWORD size=0;
                 if(!driver->GetTsStream(&data,&size,&remain) || !data || !size) break;
                 if(!total) std::cout<<"first_data_ms="<<elapsed(start)<<std::endl;
+                if(total) maxGap=(std::max)(maxGap,elapsed(lastData));
+                lastData=Clock::now();
                 output.write(reinterpret_cast<const char*>(data),size); total+=size;
+                windowBytes+=size;
                 for(DWORD i=0;i<size;++i) if(data[i]!=0xff) ++nonFF;
             } while(remain);
+            if(elapsed(windowStart)>=1000) {
+                std::cout<<"capture_ms="<<elapsed(start)<<" window_bytes="<<windowBytes<<" max_gap_ms="<<maxGap<<std::endl;
+                windowStart=Clock::now(); windowBytes=0;
+            }
         }
         output.close(); std::cout<<"bytes="<<total<<" non_ff_bytes="<<nonFF<<" signal="<<driver->GetSignalLevel()<<std::endl;
         if(!tuned || !total || !nonFF) { success=false; break; }

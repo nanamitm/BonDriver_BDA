@@ -20,9 +20,9 @@ struct FakeBus final : I2cBus {
         registers[{0x64,0xa0,0x11}]=0x40;
     }
     void Write(uint8_t address,const Bytes& data) override {
-        if(address==0x60 && failNextTuner) { failNextTuner=false; throw std::runtime_error("injected tuner write failure"); }
+        if((address==0x60 || address==0x61) && failNextTuner) { failNextTuner=false; throw std::runtime_error("injected tuner write failure"); }
         Require(data.size()>=2,"empty register write"); writes.emplace_back(address,data);
-        if(address!=0x60 && data[0]==0) { banks[address]=data[1]; return; }
+        if(address!=0x60 && address!=0x61 && data[0]==0) { banks[address]=data[1]; return; }
         for(size_t i=1;i<data.size();++i) registers[{address,banks[address],data[0]+int(i)-1}]=data[i];
     }
     Bytes Read(uint8_t address,uint8_t reg,size_t length) override {
@@ -58,7 +58,18 @@ int main() {
         FakeBus wrongStream; wrongStream.registers[{0x64,0xd0,0x88}]=0x71; Cxd2857 streamChip(wrongStream); rejected=false;
         try { streamChip.Adopt(1164560,0xb070); } catch(...) { rejected=true; }
         Require(rejected && !streamChip.Adopted(),"wrong bootstrap stream is never adopted");
-        std::cout<<"PASS: IF/ID validation, 8K path, warm restore, partial I2C failure, monitor cleanup, chip identity\n";
+        FakeBus second; Cxd2857 secondChip(second,1); secondChip.Adopt(1164560,0xb070);
+        secondChip.Tune(2471820,0xb0e0); secondChip.Restore();
+        Require(second.At(0x61,0,1)==1,"second tuner restores its RF path");
+        bool sawSecond=false;
+        for(const auto& w:second.writes) {
+            Require(w.first!=0x60,"second tuner never writes first RF address");
+            if(w.first==0x61) { sawSecond=true; Require(w.second[0]!=0x81,"preserve shared reference output"); }
+        }
+        Require(sawSecond,"second tuner uses address 0x61");
+        rejected=false; try { Cxd2857 invalid(second,2); } catch(...) { rejected=true; }
+        Require(rejected,"invalid tuner index rejected");
+        std::cout<<"PASS: IF/ID validation, 8K path, warm restore, partial I2C failure, monitor cleanup, chip identity, independent RF addresses\n";
         return 0;
     } catch(const std::exception& e) { std::cerr<<"FAIL: "<<e.what()<<'\n'; return 1; }
 }

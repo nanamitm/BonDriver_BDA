@@ -8,7 +8,10 @@
 #include <thread>
 
 namespace tbs6812 {
-constexpr uint8_t SLVT = 0x64, SLVX = 0x66, FREIA = 0x60;
+constexpr uint8_t SLVT = 0x64, SLVX = 0x66;
+Cxd2857::Cxd2857(I2cBus& bus, unsigned tunerIndex) : bus_(bus), tunerAddress_(uint8_t(0x60 + tunerIndex)) {
+    if (tunerIndex > 1) throw std::invalid_argument("TBS6812 tuner index must be 0 or 1");
+}
 void Cxd2857::Put(uint8_t address, uint8_t reg, const Bytes& bytes) {
     Bytes request{reg}; request.insert(request.end(), bytes.begin(), bytes.end());
     bus_.Write(address, request);
@@ -16,7 +19,7 @@ void Cxd2857::Put(uint8_t address, uint8_t reg, const Bytes& bytes) {
 void Cxd2857::Set(uint8_t address, uint8_t reg, uint8_t value) { Put(address, reg, {value}); }
 void Cxd2857::Bank(uint8_t bank) { Set(SLVT, 0, bank); }
 void Cxd2857::Tuner(uint8_t reg, const Bytes& bytes) {
-    Set(SLVX, 0, 0); Set(SLVX, 8, 1); Put(FREIA, reg, bytes);
+    Set(SLVX, 0, 0); Set(SLVX, 8, 1); Put(tunerAddress_, reg, bytes);
 }
 bool Cxd2857::IsS3(long id) { return id >= 0 && id <= 65535 && ((id >> 12) == 0xb || (id >> 12) == 0xc); }
 uint32_t Cxd2857::IntermediateFrequency(long rf, long oscillator) {

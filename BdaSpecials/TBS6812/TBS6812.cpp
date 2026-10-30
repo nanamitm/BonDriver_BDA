@@ -20,7 +20,7 @@ namespace {
 const GUID accessSet = {0xfaa8f3e5,0x31d4,0x4e41,{0x88,0xef,0xd9,0xeb,0x71,0x6f,0x6e,0xc9}};
 HMODULE selfModule = nullptr;
 std::mutex logMutex;
-void Log(const std::string& message) {
+void WriteLog(const std::string& message) {
     std::lock_guard<std::mutex> guard(logMutex);
     wchar_t path[MAX_PATH]{}; GetModuleFileNameW(selfModule,path,MAX_PATH);
     std::wstring name(path); const auto dot=name.rfind(L'.'); if(dot!=std::wstring::npos) name.resize(dot); name+=L".log";
@@ -31,10 +31,13 @@ void Log(const std::string& message) {
 }
 std::string HResult(HRESULT hr) { std::ostringstream out; out<<"HRESULT=0x"<<std::hex<<std::setw(8)<<std::setfill('0')<<uint32_t(hr); return out.str(); }
 std::wstring Lower(std::wstring value) { std::transform(value.begin(),value.end(),value.begin(),[](wchar_t c){ return wchar_t(towlower(c)); }); return value; }
-bool Target(const wchar_t* display,const wchar_t* friendly) {
+int Target(const wchar_t* display,const wchar_t* friendly) {
     const std::wstring d=Lower(display?display:L""), n=Lower(friendly?friendly:L"");
-    return d.find(L"ven_544d")!=d.npos && d.find(L"dev_6178")!=d.npos && d.find(L"subsys_00016812")!=d.npos &&
-        n.find(L"6812")!=n.npos && n.size()>=7 && n.compare(n.size()-7,7,L"tuner 0")==0;
+    if(d.find(L"ven_544d")==d.npos || d.find(L"dev_6178")==d.npos || d.find(L"subsys_00016812")==d.npos ||
+        n.find(L"6812")==n.npos || n.size()<7) return -1;
+    if(n.compare(n.size()-7,7,L"tuner 0")==0) return 0;
+    if(n.compare(n.size()-7,7,L"tuner 1")==0) return 1;
+    return -1;
 }
 CComPtr<IKsPropertySet> Properties(IBaseFilter* tuner) {
     CComPtr<IEnumPins> pins;
@@ -79,17 +82,20 @@ class Specials final : public IBdaSpecials2b5 {
     std::unique_ptr<KsBus> bus_;
     std::unique_ptr<tbs6812::Cxd2857> chip_;
     std::mutex mutex_;
-    bool validTarget_, fatal_=false, bootstrapPending_=false, finalized_=false;
+    int tunerIndex_;
+    std::wstring identity_;
+    bool fatal_=false, bootstrapPending_=false, finalized_=false;
     DWORD lockTimeout_=3000;
     TuningParam bootstrap_;
     HANDLE claim_=nullptr;
+    void Log(const std::string& message) const { WriteLog("tuner="+std::to_string(tunerIndex_)+" "+message); }
     static uint32_t IF(const TuningParam& p) { return tbs6812::Cxd2857::IntermediateFrequency(p.Frequency,p.Antenna.LowOscillator); }
     bool Supported(const TuningParam* p) {
         return p && tbs6812::Cxd2857::IsS3(p->TSID) && (p->Polarisation==BDA_POLARISATION_CIRCULAR_R || p->Polarisation==BDA_POLARISATION_CIRCULAR_L) && p->Antenna.Tone==0 && p->Antenna.DiSEqC<=0;
     }
     const HRESULT Error(const char* stage,const std::exception& e) { Log(std::string(stage)+": "+e.what()); return E_FAIL; }
 public:
-    Specials(IBaseFilter* tuner,bool target):tuner_(tuner),validTarget_(target) {}
+    Specials(IBaseFilter* tuner,int index,const wchar_t* display):tuner_(tuner),tunerIndex_(index),identity_(Lower(display?display:L"")) {}
     ~Specials() { if(claim_) CloseHandle(claim_); }
     const HRESULT ReadIniFile(const WCHAR* path) override {
         lockTimeout_=std::clamp<DWORD>(GetPrivateProfileIntW(L"TBS6812",L"LockTimeoutMs",3000,path),100,10000);
@@ -98,22 +104,30 @@ public:
     const HRESULT InitializeHook() override {
         std::lock_guard<std::mutex> guard(mutex_);
         try {
-            if(!validTarget_) throw std::runtime_error("only PCI TBS6812 Tuner 0 is supported");
-            claim_=CreateMutexW(nullptr,FALSE,L"Local\\BonDriver_TBS6812_Direct_Tuner0");
-            if(!claim_ || GetLastError()==ERROR_ALREADY_EXISTS) throw std::runtime_error("Tuner 0 direct-control extension is already open");
+            if(tunerIndex_<0) throw std::runtime_error("only PCI TBS6812 Tuner 0/1 is supported");
+            // Stable device-path hash keeps claims independent across slots and cards.
+            uint64_t hash=14695981039346656037ULL;
+            for(wchar_t c:identity_) { hash^=uint16_t(c); hash*=1099511628211ULL; }
+            const auto name=L"Local\\BonDriver_TBS6812_Direct_"+std::to_wstring(hash)+L"_"+std::to_wstring(tunerIndex_);
+            claim_=CreateMutexW(nullptr,FALSE,name.c_str());
+            if(!claim_ || GetLastError()==ERROR_ALREADY_EXISTS) throw std::runtime_error("this tuner direct-control extension is already open");
             property_=Properties(tuner_);
             DWORD support=0; HRESULT hr=property_->QuerySupported(accessSet,0x19,&support);
             if(FAILED(hr) || (support&(KSPROPERTY_SUPPORT_GET|KSPROPERTY_SUPPORT_SET))!=(KSPROPERTY_SUPPORT_GET|KSPROPERTY_SUPPORT_SET)) throw std::runtime_error("raw I2C property 0x19 is unavailable");
-            bus_=std::make_unique<KsBus>(property_); chip_=std::make_unique<tbs6812::Cxd2857>(*bus_);
+            bus_=std::make_unique<KsBus>(property_); chip_=std::make_unique<tbs6812::Cxd2857>(*bus_,unsigned(tunerIndex_));
             BYTE modes[8]{}; DWORD returned=0;
             hr=property_->Get(accessSet,0x3c,nullptr,0,modes,sizeof(modes),&returned);
-            if(FAILED(hr) || modes[0]!=2) throw std::runtime_error("Tuner 0 must already be in satellite mode; no card-wide mode changes are performed");
+            if(FAILED(hr)) throw std::runtime_error("read tuner modes: "+HResult(hr));
+            if(returned<=DWORD(tunerIndex_)) throw std::runtime_error("tuner mode property returned a truncated slot array");
+            if(modes[tunerIndex_]!=2) throw std::runtime_error("selected tuner must already be in satellite mode; no card-wide mode changes are performed");
             Log("initialized: warm ISDB-S3 takeover; vendor bootstrap required");
             return S_OK;
         } catch(const std::exception& e) { fatal_=true; return Error("initialize",e); }
     }
     const HRESULT SetLNBPower(bool active) override {
         if(!property_) return E_FAIL;
+        // Only adapter 0 owns the board's LNB supply. Slot 1 must not change it.
+        if(tunerIndex_==1) return S_OK;
         BYTE request[0x94]{}; const DWORD value=active?2:0; // 13 V or off
         memcpy(request+0x0c,&value,sizeof(value));
         return property_->Set(accessSet,0x15,nullptr,0,request,sizeof(request));
@@ -191,8 +205,8 @@ public:
 // Keep thread notifications enabled: this project links the static CRT.
 BOOL WINAPI DllMain(HINSTANCE module,DWORD reason,LPVOID) { if(reason==DLL_PROCESS_ATTACH) selfModule=module; return TRUE; }
 extern "C" __declspec(dllexport) HRESULT CheckAndInitTuner(IBaseFilter*,const WCHAR* display,const WCHAR* friendly,const WCHAR*) {
-    return Target(display,friendly)?S_OK:E_INVALIDARG;
+    return Target(display,friendly)>=0?S_OK:E_INVALIDARG;
 }
 extern "C" __declspec(dllexport) IBdaSpecials* CreateBdaSpecials2(CComPtr<IBaseFilter> tuner,CComPtr<IBaseFilter>,const WCHAR* display,const WCHAR* friendly,const WCHAR*,const WCHAR*) {
-    try { return new Specials(tuner,Target(display,friendly)); } catch(...) { return nullptr; }
+    try { return new Specials(tuner,Target(display,friendly),display); } catch(...) { return nullptr; }
 }
