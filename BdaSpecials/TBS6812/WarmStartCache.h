@@ -10,7 +10,7 @@ namespace tbs6812 {
 struct WarmStartRecord {
     uint32_t frequencyKHz;
     uint16_t streamID;
-    SatelliteSystem system = SatelliteSystem::ISDBS3;
+    DeliverySystem system = DeliverySystem::ISDBS3;
 };
 // Experimental, explicitly configured storage. A record is consumed
 // before use and only republished after successful normal restoration.
@@ -21,21 +21,21 @@ inline uint64_t WarmChecksum(uint64_t device, uint32_t frequency, uint32_t strea
     }
     return hash;
 }
-inline std::optional<WarmStartRecord> ReadWarmRecord(const std::filesystem::path& path, uint64_t device, SatelliteSystem expected = SatelliteSystem::ISDBS3) {
+inline std::optional<WarmStartRecord> ReadWarmRecord(const std::filesystem::path& path, uint64_t device, DeliverySystem expected = DeliverySystem::ISDBS3) {
     std::error_code error;
     const auto size=std::filesystem::file_size(path,error);
     if(error || size>256) return {};
     std::ifstream input(path);
     std::string magic,extra; uint64_t savedDevice=0,checksum=0; uint32_t frequency=0,stream=0;
-    unsigned system = unsigned(SatelliteSystem::ISDBS3);
+    unsigned system = unsigned(DeliverySystem::ISDBS3);
     if (!(input>>magic>>savedDevice>>frequency>>stream>>checksum)) return {};
     if (magic == "TBS6812-WARM-2") {
         if (!(input>>system) || (system != 1 && system != 3)) return {};
     } else if (magic != "TBS6812-WARM-1") return {};
-    const auto savedSystem = SatelliteSystem(system);
+    const auto savedSystem = DeliverySystem(system);
     const uint64_t wanted = WarmChecksum(device,frequency,stream) ^ (magic == "TBS6812-WARM-2" ? system : 0U);
     if (input>>extra || savedDevice!=device || savedSystem!=expected || stream>65535 ||
-        frequency<950000 || frequency>(savedSystem==SatelliteSystem::ISDBS3 ? 3224000U : 2150000U) ||
+        !Cxd2857::ValidFrequency(frequency,savedSystem) ||
         !Cxd2857::SupportsID(stream,savedSystem) || checksum!=wanted) return {};
     return WarmStartRecord{frequency,uint16_t(stream),savedSystem};
 }

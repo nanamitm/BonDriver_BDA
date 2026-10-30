@@ -96,7 +96,7 @@ class Specials final : public IBdaSpecials2b5 {
     bool fatal_=false, bootstrapPending_=false, finalized_=false;
     bool inspectWarm_=false;
     bool warmStart_=false;
-    tbs6812::SatelliteSystem system_=tbs6812::SatelliteSystem::ISDBS3;
+    tbs6812::DeliverySystem system_=tbs6812::DeliverySystem::ISDBS3;
     bool validSystem_=true;
     std::wstring cacheDirectory_,cachePath_;
     uint64_t deviceHash_=0;
@@ -130,8 +130,16 @@ class Specials final : public IBdaSpecials2b5 {
             throw std::runtime_error("cannot publish the experimental warm-start record");
         Log("warm-cache published after locked restoration; wait_ms="+std::to_string(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()));
     }
-    static uint32_t IF(const TuningParam& p) { return tbs6812::Cxd2857::IntermediateFrequency(p.Frequency,p.Antenna.LowOscillator); }
+    bool Terrestrial() const { return system_==tbs6812::DeliverySystem::ISDBT; }
+    uint16_t Stream(const TuningParam& p) const { return Terrestrial() ? 0 : uint16_t(p.TSID); }
+    uint32_t IF(const TuningParam& p) const {
+        if(!Terrestrial()) return tbs6812::Cxd2857::IntermediateFrequency(p.Frequency,p.Antenna.LowOscillator);
+        if(p.Frequency<90000 || p.Frequency>770000) throw std::runtime_error("ISDB-T RF must be 90..770 MHz");
+        return uint32_t(p.Frequency);
+    }
     bool Supported(const TuningParam* p) {
+        if(Terrestrial()) return p && p->Modulation.BandWidth==6 &&
+            p->Polarisation<=BDA_POLARISATION_NOT_DEFINED && p->Antenna.DiSEqC<=0;
         return p && tbs6812::Cxd2857::SupportsID(p->TSID,system_) && (p->Polarisation==BDA_POLARISATION_CIRCULAR_R || p->Polarisation==BDA_POLARISATION_CIRCULAR_L) && p->Antenna.Tone==0 && p->Antenna.DiSEqC<=0;
     }
     const HRESULT Error(const char* stage,const std::exception& e) { Log(std::string(stage)+": "+e.what()); return E_FAIL; }
@@ -143,9 +151,15 @@ public:
         inspectWarm_=GetPrivateProfileIntW(L"TBS6812",L"InspectWarmState",0,path)!=0;
         warmStart_=GetPrivateProfileIntW(L"TBS6812",L"ExperimentalWarmStart",0,path)!=0;
         wchar_t system[32]{};
-        GetPrivateProfileStringW(L"TBS6812",L"SatelliteSystem",L"ISDB-S3",system,32,path);
-        validSystem_=_wcsicmp(system,L"ISDB-S")==0 || _wcsicmp(system,L"ISDB-S3")==0;
-        system_=_wcsicmp(system,L"ISDB-S")==0 ? tbs6812::SatelliteSystem::ISDBS : tbs6812::SatelliteSystem::ISDBS3;
+        wchar_t legacy[32]{};
+        GetPrivateProfileStringW(L"TBS6812",L"SatelliteSystem",L"ISDB-S3",legacy,32,path);
+        GetPrivateProfileStringW(L"TBS6812",L"DeliverySystem",legacy,system,32,path);
+        validSystem_=_wcsicmp(system,L"ISDB-T")==0 || _wcsicmp(system,L"ISDB-S")==0 || _wcsicmp(system,L"ISDB-S3")==0;
+        system_=_wcsicmp(system,L"ISDB-T")==0 ? tbs6812::DeliverySystem::ISDBT : _wcsicmp(system,L"ISDB-S")==0 ? tbs6812::DeliverySystem::ISDBS : tbs6812::DeliverySystem::ISDBS3;
+        if(Terrestrial() && warmStart_) {
+            warmStart_=false;
+            Log("ISDB-T cached takeover is not enabled; vendor preparation is required on each open");
+        }
         wchar_t directory[MAX_PATH]{};
         GetPrivateProfileStringW(L"TBS6812",L"WarmStartCacheDirectory",L"",directory,MAX_PATH,path);
         cacheDirectory_=directory;
@@ -154,7 +168,7 @@ public:
     const HRESULT InitializeHook() override {
         std::lock_guard<std::mutex> guard(mutex_);
         try {
-            if(!validSystem_) throw std::runtime_error("SatelliteSystem must be ISDB-S or ISDB-S3");
+            if(!validSystem_) throw std::runtime_error("DeliverySystem must be ISDB-T, ISDB-S or ISDB-S3");
             if(tunerIndex_<0) throw std::runtime_error("only PCI TBS6812 Tuner 0/1 is supported");
             // Stable device-path hash keeps claims independent across slots and cards.
             uint64_t hash=14695981039346656037ULL;
@@ -171,8 +185,10 @@ public:
             hr=property_->Get(accessSet,0x3c,nullptr,0,modes,sizeof(modes),&returned);
             if(FAILED(hr)) throw std::runtime_error("read tuner modes: "+HResult(hr));
             if(returned<=DWORD(tunerIndex_)) throw std::runtime_error("tuner mode property returned a truncated slot array");
-            if(modes[tunerIndex_]!=2) throw std::runtime_error("selected tuner must already be in satellite mode; no card-wide mode changes are performed");
-            Log(warmStart_ ? "initialized: experimental cached warm start; vendor fallback available" : "initialized: warm satellite takeover; vendor bootstrap required");
+            if(modes[tunerIndex_]!=(Terrestrial()?1:2)) throw std::runtime_error(
+                Terrestrial() ? "selected tuner must be in terrestrial mode (1); close all card users and use the vendor mode tool first"
+                              : "selected tuner must be in satellite mode (2); close all card users and use the vendor mode tool first");
+            Log(warmStart_ ? "initialized: experimental cached warm start; vendor fallback available" : "initialized: warm ISDB takeover; vendor bootstrap required");
             if(warmStart_) {
                 if(cacheDirectory_.empty() || !std::filesystem::path(cacheDirectory_).is_absolute()) throw std::runtime_error("experimental warm start requires an absolute cache directory");
                 std::filesystem::create_directories(cacheDirectory_);
@@ -183,6 +199,7 @@ public:
         } catch(const std::exception& e) { fatal_=true; return Error("initialize",e); }
     }
     const HRESULT SetLNBPower(bool active) override {
+        if(Terrestrial()) return S_OK; // Never change shared LNB supply for terrestrial reception.
         if(!property_) return E_FAIL;
         // Only adapter 0 owns the board's LNB supply. Slot 1 must not change it.
         if(tunerIndex_==1) return S_OK;
@@ -193,16 +210,17 @@ public:
     const HRESULT Set22KHz(bool active) override { return active?E_INVALIDARG:S_OK; }
     const HRESULT Set22KHz(long tone) override { return tone==0?S_OK:E_INVALIDARG; }
     const HRESULT SetTSid(long id) override {
+        if(Terrestrial()) return S_OK; // TSID does not select terrestrial RF.
         if(!property_ || !tbs6812::Cxd2857::SupportsID(id,system_)) return E_INVALIDARG;
         return property_->Set(accessSet,0x60,&id,sizeof(id),&id,sizeof(id));
     }
     const HRESULT LockChannel(const TuningParam* p) override {
         std::lock_guard<std::mutex> guard(mutex_);
         if(fatal_ || finalized_ || !chip_) return E_FAIL;
-        if(!Supported(p)) { Log("rejected: this extension accepts configured circular satellite channels with tone off only"); return E_INVALIDARG; }
+        if(!Supported(p)) { Log("rejected: unsupported channel: check delivery system, 6 MHz ISDB-T bandwidth or circular satellite settings"); return E_INVALIDARG; }
         try {
             const auto frequency=IF(*p);
-            if(system_==tbs6812::SatelliteSystem::ISDBS && frequency>2150000) throw std::runtime_error("ISDB-S IF must be 950..2150 MHz");
+            if(system_==tbs6812::DeliverySystem::ISDBS && frequency>2150000) throw std::runtime_error("ISDB-S IF must be 950..2150 MHz");
             if(!chip_->Adopted()) {
                 if(!cachePath_.empty()) {
                     const auto cached=tbs6812::ReadWarmRecord(cachePath_,deviceHash_,system_);
@@ -220,7 +238,7 @@ public:
                 }
             }
             if(!chip_->Adopted()) {
-                if(system_==tbs6812::SatelliteSystem::ISDBS && p->TSID<8) {
+                if(system_==tbs6812::DeliverySystem::ISDBS && p->TSID<8) {
                     Log("bootstrap requires an absolute TSID; relative TS indices are supported after adoption only");
                     return E_INVALIDARG;
                 }
@@ -230,7 +248,7 @@ public:
                 return E_NOINTERFACE;
             }
             const auto start=std::chrono::steady_clock::now();
-            chip_->Tune(frequency,uint16_t(p->TSID));
+            chip_->Tune(frequency,Stream(*p));
             do {
                 if(chip_->Locked()) {
                     std::ostringstream s; s<<"direct tune IF_kHz="<<frequency<<" stream_id=0x"<<std::hex<<p->TSID<<std::dec<<" lock_ms="<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count(); Log(s.str());
@@ -238,7 +256,7 @@ public:
                 }
                 Sleep(5);
             } while(std::chrono::steady_clock::now()-start<std::chrono::milliseconds(lockTimeout_));
-            Log("direct tune timed out: no satellite lock; vendor tune was not resubmitted");
+            Log("direct tune timed out: no configured ISDB lock; vendor tune was not resubmitted");
             return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
         } catch(const std::exception& e) { return Error("direct tune",e); }
     }
@@ -247,9 +265,14 @@ public:
         if(!bootstrapPending_ || !chip_ || fatal_) return S_OK;
         bootstrapPending_=false;
         try {
-            if(!chip_->Locked()) throw std::runtime_error("initial vendor tune did not lock; close/reopen before retrying");
-            chip_->Adopt(IF(bootstrap_),uint16_t(bootstrap_.TSID));
-            originalRecord_=tbs6812::WarmStartRecord{IF(bootstrap_),uint16_t(bootstrap_.TSID),system_};
+            const bool locked=chip_->Locked();
+            if(!locked) {
+                if(!Terrestrial()) throw std::runtime_error("initial vendor tune did not lock; close/reopen before retrying");
+                Log("ISDB-T vendor bootstrap did not lock: no takeover; next channel will retry vendor preparation");
+                return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+            }
+            chip_->Adopt(IF(bootstrap_),Stream(bootstrap_));
+            originalRecord_=tbs6812::WarmStartRecord{IF(bootstrap_),Stream(bootstrap_),system_};
             Inspect("after-vendor");
             Log("bootstrap adopted: CXD2857ER already active; no chip reset or clock reinitialization");
             return S_OK;

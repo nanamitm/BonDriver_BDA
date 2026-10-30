@@ -2,6 +2,7 @@
 #include "Cxd2857.h"
 #include "WarmStartCache.h"
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <map>
 #include <stdexcept>
@@ -28,7 +29,7 @@ struct FakeBus final : I2cBus {
         for(size_t i=1;i<data.size();++i) registers[{address,banks[address],data[0]+int(i)-1}]=data[i];
     }
     Bytes Read(uint8_t address,uint8_t reg,size_t length) override {
-        if(failMonitor && address==0x64 && banks[address]==0xd0 && reg==0xf3) throw std::runtime_error("injected monitor failure");
+        if(failMonitor && address==0x64 && ((banks[address]==0xd0 && reg==0xf3) || (banks[address]==0x60 && reg==0x28))) throw std::runtime_error("injected monitor failure");
         Bytes answer(length); for(size_t i=0;i<length;++i) answer[i]=registers[{address,banks[address],reg+int(i)}]; return answer;
     }
     uint8_t At(int address,int bank,int reg) { return registers[{address,bank,reg}]; }
@@ -94,7 +95,7 @@ int main() {
         standard.registers[{0x64,0,0xa9}]=0;
         standard.registers[{0x64,0xc0,0xe9}]=0x40;
         standard.registers[{0x64,0xc0,0xea}]=0x10;
-        Cxd2857 standardChip(standard,0,SatelliteSystem::ISDBS);
+        Cxd2857 standardChip(standard,0,DeliverySystem::ISDBS);
         Require(!standardChip.Locked(),"ISDB-S must not use S3 lock bit");
         standard.registers[{0x64,0xa0,0x12}]=0x40;
         standardChip.AdoptCached(1049480,0x4010);
@@ -117,9 +118,56 @@ int main() {
         Require(rejected && standard.writes.empty(),"ISDB-S rejects out-of-band IF before writes");
         rejected=false; try { standardChip.Tune(1049480,0xb070); } catch(...) { rejected=true; }
         Require(rejected && standard.writes.empty(),"ISDB-S rejects S3 stream before writes");
-        FakeBus otherMode; Cxd2857 otherModeChip(otherMode,0,SatelliteSystem::ISDBS);
+        FakeBus otherMode; Cxd2857 otherModeChip(otherMode,0,DeliverySystem::ISDBS);
         rejected=false; try { otherModeChip.Adopt(1049480,0x4010); } catch(...) { rejected=true; }
         Require(rejected && !otherModeChip.Adopted(),"wrong demodulator core rejected");
+        FakeBus terrestrial;
+        terrestrial.registers[{0x66,0,0x17}]=6;
+        terrestrial.registers[{0x64,0,0xa9}]=0;
+        terrestrial.registers[{0x64,0x10,0xd7}]=4;
+        terrestrial.registers[{0x64,0x60,0x10}]=3;
+        terrestrial.registers[{0x60,0,0x67}]=0xff;
+        Cxd2857 terrestrialChip(terrestrial,0,DeliverySystem::ISDBT);
+        terrestrial.writes.clear(); rejected=false;
+        try { terrestrialChip.AdoptCached(473143,0); } catch(...) { rejected=true; }
+        Require(rejected && terrestrial.writes.empty(),"ISDB-T cache rejected before I2C without RF verification");
+        terrestrialChip.Adopt(473143,0);
+        terrestrial.writes.clear();
+        terrestrialChip.Tune(557143,0);
+        Require(terrestrial.At(0x60,0,0x70)==0x57 && terrestrial.At(0x60,0,0x71)==0x80 &&
+            terrestrial.At(0x60,0,0x72)==8,"ISDB-T RF frequency packet");
+        Require(terrestrial.At(0x60,0,0x69)==0x87 && terrestrial.At(0x60,0,0x6c)==0x33 &&
+            terrestrial.At(0x60,0,0x6e)==0x17 && terrestrial.At(0x60,0,0x6f)==0x1b,"ISDB-T 6 MHz RF row");
+        Require(terrestrial.At(0x60,0,0x67)==0xfd && terrestrial.At(0x64,0,0xc3)==0 &&
+            terrestrial.At(0x60,0,0x87)==0xc0,"ISDB-T masked analog setting and output resume");
+        for(const auto& w:terrestrial.writes) {
+            if(w.first==0x60) Require(w.second[0]<0x81 || w.second[0]>0x86,"ISDB-T preserves REFOUT and GPIO");
+            if(w.first==0x64) Require(w.second[0]!=0xe9 && w.second[0]!=0x87,"ISDB-T does not write satellite stream selector");
+        }
+        for(uint8_t status : {uint8_t(0),uint8_t(1),uint8_t(2),uint8_t(0x13)}) {
+            terrestrial.registers[{0x64,0x60,0x10}]=status;
+            Require(!terrestrialChip.Locked(),"ISDB-T requires sync, TS lock and no unlock");
+        }
+        terrestrial.registers[{0x64,0x60,0x10}]=3;
+        Require(terrestrialChip.Locked(),"ISDB-T lock bank");
+        terrestrial.registers[{0x64,0x60,0x28}]=0x13;
+        terrestrial.registers[{0x64,0x60,0x29}]=0x88;
+        Require(std::fabs(terrestrialChip.CNR()-27.9587f)<0.001f,"ISDB-T C/N conversion");
+        terrestrial.failMonitor=true; rejected=false; try { terrestrialChip.CNR(); } catch(...) { rejected=true; }
+        Require(rejected && terrestrial.At(0x64,0,1)==0,"ISDB-T monitor failure unfreezes registers");
+        terrestrial.failNextTuner=true; rejected=false; try { terrestrialChip.Tune(473143,0); } catch(...) { rejected=true; }
+        Require(rejected,"ISDB-T partial tune failure propagated");
+        terrestrialChip.Restore();
+        Require(terrestrial.At(0x60,0,0x70)==0x37 && terrestrial.At(0x60,0,0x71)==0x38 &&
+            terrestrial.At(0x60,0,0x72)==7 && terrestrial.At(0x64,0,0xc3)==0,"ISDB-T restore after failed tune");
+        terrestrial.writes.clear(); rejected=false;
+        try { terrestrialChip.Tune(800000,0); } catch(...) { rejected=true; }
+        Require(rejected && terrestrial.writes.empty(),"ISDB-T invalid RF rejected before writes");
+        FakeBus wrongBand;
+        wrongBand.registers[{0x66,0,0x17}]=6; wrongBand.registers[{0x64,0,0xa9}]=0;
+        Cxd2857 wrongBandChip(wrongBand,0,DeliverySystem::ISDBT);
+        rejected=false; try { wrongBandChip.Adopt(473143,0); } catch(...) { rejected=true; }
+        Require(rejected && !wrongBandChip.Adopted(),"ISDB-T rejects non-6-MHz preparation");
         const auto path=std::filesystem::temp_directory_path()/("tbs6812-cache-test-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".state");
         struct Cleanup { std::filesystem::path path; ~Cleanup(){std::error_code error;std::filesystem::remove(path,error);} } cleanup{path};
         Require(!ReadWarmRecord(path,17),"missing cache rejected");
@@ -127,12 +175,15 @@ int main() {
         const auto saved=ReadWarmRecord(path,17);
         Require(saved && saved->frequencyKHz==1164560 && saved->streamID==0xb070,"cache round trip");
         Require(!ReadWarmRecord(path,18),"different device cache rejected");
-        Require(!ReadWarmRecord(path,17,SatelliteSystem::ISDBS),"S3 record cannot bootstrap ISDB-S");
-        WriteWarmRecord(path,17,{1049480,0x4010,SatelliteSystem::ISDBS});
-        Require(bool(ReadWarmRecord(path,17,SatelliteSystem::ISDBS)),"ISDB-S cache round trip");
+        Require(!ReadWarmRecord(path,17,DeliverySystem::ISDBS),"S3 record cannot bootstrap ISDB-S");
+        WriteWarmRecord(path,17,{1049480,0x4010,DeliverySystem::ISDBS});
+        Require(bool(ReadWarmRecord(path,17,DeliverySystem::ISDBS)),"ISDB-S cache round trip");
         Require(!ReadWarmRecord(path,17),"ISDB-S record cannot bootstrap S3");
         { std::ofstream legacy(path); legacy<<"TBS6812-WARM-1 17 1164560 45168 "<<WarmChecksum(17,1164560,45168)<<'\n'; }
-        Require(bool(ReadWarmRecord(path,17)) && !ReadWarmRecord(path,17,SatelliteSystem::ISDBS),"legacy cache is S3 only");
+        Require(bool(ReadWarmRecord(path,17)) && !ReadWarmRecord(path,17,DeliverySystem::ISDBS),"legacy cache is S3 only");
+        WriteWarmRecord(path,17,{473143,0,DeliverySystem::ISDBT});
+        Require(!ReadWarmRecord(path,17,DeliverySystem::ISDBT),"ISDB-T warm cache remains unsupported");
+        Require(!ReadWarmRecord(path,17,DeliverySystem::ISDBS) && !ReadWarmRecord(path,17),"terrestrial cache isolated from satellite");
         WriteWarmRecord(path,17,{1,0xb070}); Require(!ReadWarmRecord(path,17),"invalid cached IF rejected");
         WriteWarmRecord(path,17,{1164560,0x4010}); Require(!ReadWarmRecord(path,17),"invalid cached stream rejected");
         { std::ofstream corrupt(path); corrupt<<"TBS6812-WARM-1 17 1164560 45168 0\n"; }
@@ -141,7 +192,7 @@ int main() {
         Require(!ReadWarmRecord(path,17),"malformed cache rejected");
         { std::ofstream oversized(path); oversized<<std::string(300,'x'); }
         Require(!ReadWarmRecord(path,17),"oversized cache rejected");
-        std::cout<<"PASS: IF/ID validation, warm restore, I2C failures, independent RF addresses, cached hardware guards, cache validation\n";
+        std::cout<<"PASS: ISDB-T RF/lock/CNR/restore/cache, IF/ID validation, warm restore, I2C failures, independent RF addresses, cached hardware guards, cache validation\n";
         return 0;
     } catch(const std::exception& e) { std::cerr<<"FAIL: "<<e.what()<<'\n'; return 1; }
 }
