@@ -250,12 +250,40 @@ const BOOL CBonTuner::OpenTuner(void)
 	return ret;
 }
 
+// Lets the tuner specific DLL prepare the card before a graph is built
+void CBonTuner::PrepareBoardForOpen(void)
+{
+	if (m_aTunerParam.sDLLBaseName.empty() || common::WStringToUpperCase(m_aTunerParam.sDLLBaseName) == L"AUTO")
+		return;
+
+	WCHAR szPath[_MAX_PATH + 1] = L"";
+	::GetModuleFileNameW(st_hModule, szPath, _MAX_PATH + 1);
+	WCHAR szDrive[_MAX_DRIVE];
+	WCHAR szDir[_MAX_DIR];
+	WCHAR szFName[_MAX_FNAME];
+	WCHAR szExt[_MAX_EXT];
+	::_wsplitpath_s(szPath, szDrive, szDir, szFName, szExt);
+	std::wstring sDllName = common::WStringPrintf(L"%s%s%s.dll", szDrive, szDir, m_aTunerParam.sDLLBaseName.c_str());
+
+	HMODULE hModule = ::LoadLibraryW(sDllName.c_str());
+	if (!hModule)
+		return;
+
+	HRESULT (* func)(const WCHAR *) = (HRESULT (*)(const WCHAR *))::GetProcAddress(hModule, "PrepareBoardForOpen");
+	// S_OK: the card restarted, so the device list is stale
+	if (func && (* func)(m_sIniFilePath.c_str()) == S_OK)
+		m_UsableTunerCaptureList.clear();
+	::FreeLibrary(hModule);
+}
+
 const BOOL CBonTuner::_OpenTuner(void)
 {
 	if (m_bOpened)
 		return TRUE;
 
 	HRESULT hr;
+
+	PrepareBoardForOpen();
 
 	do {
 		// フィルタグラフの作成

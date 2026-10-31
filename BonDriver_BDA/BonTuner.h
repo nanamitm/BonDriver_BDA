@@ -194,6 +194,7 @@ protected:
 
 	// CCOM処理専用スレッドから呼び出される関数
 	const BOOL _OpenTuner(void);
+	void PrepareBoardForOpen(void);
 	void _CloseTuner(void);
 	const BOOL _SetChannel(const DWORD dwSpace, const DWORD dwChannel);
 	const float _GetSignalLevel(void);

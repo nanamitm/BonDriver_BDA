@@ -1,5 +1,5 @@
 # Deploys the all-systems BonDriver into a TVTest or EDCB folder. Run tools/build-tbs.ps1 first.
-# Does not write the board mode: set both inputs to satellite once with tbs6812-board-mode.exe write 2 2.
+# Does not write the board mode: the first open of the BonDriver sets both inputs to satellite while the card is free.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$Destination,
