@@ -2,7 +2,7 @@
 setlocal
 pushd "%~dp0.."
 if not exist work mkdir work
-call "%ProgramFiles%\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44 >nul
+call "%~dp0vcvars.cmd"
 if errorlevel 1 exit /b 1
 cl /nologo /EHsc /std:c++17 /MT /W4 /WX /IBdaSpecials\TBS6812 tests\tbs6812-test.cpp BdaSpecials\TBS6812\Cxd2857.cpp /Fe:work\tbs6812-test.exe /Fo:work\
 if errorlevel 1 exit /b 1
