@@ -1,13 +1,15 @@
-# TBS6812.dll: warm ISDB-T / ISDB-S / ISDB-S3 direct control
+# TBS6812.dll: warm ISDB-T / ISDB-S / ISDB-S3 / J.83B direct control
 
 This extension replaces per-channel vendor BDA tuning with raw I2C through
 property 0x19. It supports **TBS6812 Tuner 0/1 with matching Capture 0/1,
-ISDB-T (6 MHz), ISDB-S and ISDB-S3**, including two simultaneous receiver processes.
+ISDB-T (6 MHz), ISDB-S, ISDB-S3 and optical J.83B (5.6 Msym/s)**, including two simultaneous receiver processes.
 The shared-driver configuration can automatically claim an available slot.
 The vendor Windows driver and the BonDriver_BDA capture graph remain in use.
 The existing dantto4k DLL remains responsible for S3 conditional access and TS remux.
 Conventional ISDB-S and ISDB-T emit 188-byte TS directly; see
 [ISDB-S setup](tbs6812-isdb-s.md) and [ISDB-T setup and mode constraints](tbs6812-isdb-t.md).
+Optical J.83B uses a prepared ISDB-T carrier before switching cores; see
+[J.83B setup, restoration and current limitations](tbs6812-j83b.md).
 
 ## Lifecycle
 
