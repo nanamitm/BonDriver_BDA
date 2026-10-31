@@ -236,6 +236,19 @@ void Cxd2857::EndJ83B() {
     if(!adopted_ || !Terrestrial()) throw std::runtime_error("J.83B handback requires an adopted terrestrial core");
     if(cableDirty_) RestoreTerrestrial();
 }
+// A killed process leaves the J.83B core running, and the vendor driver only initializes
+// its demodulator when the board mode is written, so its next tune never locks.
+bool Cxd2857::RecoverAbandonedCable() {
+    if(adopted_ || !Terrestrial()) return false;
+    Set(SLVX,0,0);
+    if(bus_.Read(SLVX,0x17,1)[0]!=8) return false;
+    Output(1); Bank(0); Set(SLVT,0x81,0xff);
+    WakeTerrestrial();
+    Bank(0); Set(SLVT,0x81,0);
+    Output(0);
+    Bank(0);
+    return true;
+}
 void Cxd2857::Restore() {
     if(cableDirty_) { RestoreTerrestrial(); return; }
     if (!adopted_ || !dirty_) return;

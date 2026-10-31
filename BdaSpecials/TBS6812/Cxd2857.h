@@ -23,6 +23,7 @@ public:
     void Restore();
     void BeginJ83B();
     void EndJ83B();
+    bool RecoverAbandonedCable();
     bool J83BActive() const { return cableActive_; }
     bool Locked();
     float CNR();

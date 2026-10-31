@@ -164,6 +164,14 @@ int main() {
         terrestrial.writes.clear(); rejected=false;
         try { terrestrialChip.Tune(800000,0); } catch(...) { rejected=true; }
         Require(rejected && terrestrial.writes.empty(),"ISDB-T invalid RF rejected before writes");
+        FakeBus abandoned; abandoned.registers[{0x66,0,0x17}]=8; abandoned.registers[{0x64,0,0x81}]=0xff; abandoned.registers[{0x64,0,0xc3}]=1;
+        Cxd2857 abandonedChip(abandoned,0,DeliverySystem::ISDBT);
+        Require(abandonedChip.RecoverAbandonedCable(),"abandoned J.83B core is recovered");
+        Require(abandoned.At(0x66,0,0x17)==6 && abandoned.At(0x64,0x10,0xd7)==4 && abandoned.At(0x64,0,0x81)==0 && abandoned.At(0x64,0,0xc3)==0,"recovery wakes ISDB-T 6 MHz with output enabled");
+        abandoned.writes.clear();
+        Require(!abandonedChip.RecoverAbandonedCable() && abandoned.writes.size()==1 && abandoned.writes[0].first==0x66 && abandoned.writes[0].second==Bytes{0,0},"ISDB-T core only selects the bank to read it");
+        FakeBus satelliteCore; satelliteCore.registers[{0x66,0,0x17}]=8; Cxd2857 satelliteChip(satelliteCore,0,DeliverySystem::ISDBS);
+        Require(!satelliteChip.RecoverAbandonedCable() && satelliteCore.writes.empty(),"satellite control never runs terrestrial recovery");
         FakeBus wrongBand;
         wrongBand.registers[{0x66,0,0x17}]=6; wrongBand.registers[{0x64,0,0xa9}]=0;
         Cxd2857 wrongBandChip(wrongBand,0,DeliverySystem::ISDBT);

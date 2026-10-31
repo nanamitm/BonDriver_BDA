@@ -229,6 +229,7 @@ public:
             if(modes[tunerIndex_]!=(Terrestrial()?1:2)) throw std::runtime_error(
                 Terrestrial() ? "selected tuner must be in terrestrial mode (1); close all card users and use the vendor mode tool first"
                               : "selected tuner must be in satellite mode (2); close all card users and use the vendor mode tool first");
+            if(chip_->RecoverAbandonedCable()) Log("recovered: an abnormal exit left the J.83B core running; ISDB-T core restored");
             Log(warmStart_ ? "initialized: experimental cached warm start; vendor fallback available" : "initialized: warm ISDB takeover; vendor bootstrap required");
             if(warmStart_) {
                 if(cacheDirectory_.empty() || !std::filesystem::path(cacheDirectory_).is_absolute()) throw std::runtime_error("experimental warm start requires an absolute cache directory");
