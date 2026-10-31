@@ -102,7 +102,10 @@ class Specials final : public IBdaSpecials2b5 {
     uint64_t deviceHash_=0;
     std::optional<tbs6812::WarmStartRecord> originalRecord_;
     DWORD lockTimeout_=3000;
+    uint32_t bootstrapFrequency_=473143;
     TuningParam bootstrap_;
+    std::optional<TuningParam> cableRequested_;
+    TuningParam* substitutedParam_=nullptr;
     HANDLE claim_=nullptr;
     void Log(const std::string& message) const { WriteLog("tuner="+std::to_string(tunerIndex_)+" "+message); }
     void Inspect(const char* stage) {
@@ -130,11 +133,12 @@ class Specials final : public IBdaSpecials2b5 {
             throw std::runtime_error("cannot publish the experimental warm-start record");
         Log("warm-cache published after locked restoration; wait_ms="+std::to_string(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()));
     }
-    bool Terrestrial() const { return system_==tbs6812::DeliverySystem::ISDBT; }
+    bool Terrestrial() const { return system_==tbs6812::DeliverySystem::ISDBT || Cable(); }
+    bool Cable() const { return system_==tbs6812::DeliverySystem::J83B; }
     uint16_t Stream(const TuningParam& p) const { return Terrestrial() ? 0 : uint16_t(p.TSID); }
     uint32_t IF(const TuningParam& p) const {
         if(!Terrestrial()) return tbs6812::Cxd2857::IntermediateFrequency(p.Frequency,p.Antenna.LowOscillator);
-        if(p.Frequency<90000 || p.Frequency>770000) throw std::runtime_error("ISDB-T RF must be 90..770 MHz");
+        if(p.Frequency<90000 || p.Frequency>770000) throw std::runtime_error("terrestrial-side RF must be 90..770 MHz");
         return uint32_t(p.Frequency);
     }
     bool Supported(const TuningParam* p) {
@@ -154,11 +158,12 @@ public:
         wchar_t legacy[32]{};
         GetPrivateProfileStringW(L"TBS6812",L"SatelliteSystem",L"ISDB-S3",legacy,32,path);
         GetPrivateProfileStringW(L"TBS6812",L"DeliverySystem",legacy,system,32,path);
-        validSystem_=_wcsicmp(system,L"ISDB-T")==0 || _wcsicmp(system,L"ISDB-S")==0 || _wcsicmp(system,L"ISDB-S3")==0;
-        system_=_wcsicmp(system,L"ISDB-T")==0 ? tbs6812::DeliverySystem::ISDBT : _wcsicmp(system,L"ISDB-S")==0 ? tbs6812::DeliverySystem::ISDBS : tbs6812::DeliverySystem::ISDBS3;
+        validSystem_=_wcsicmp(system,L"J.83B")==0 || _wcsicmp(system,L"ISDB-T")==0 || _wcsicmp(system,L"ISDB-S")==0 || _wcsicmp(system,L"ISDB-S3")==0;
+        system_=_wcsicmp(system,L"J.83B")==0 ? tbs6812::DeliverySystem::J83B : _wcsicmp(system,L"ISDB-T")==0 ? tbs6812::DeliverySystem::ISDBT : _wcsicmp(system,L"ISDB-S")==0 ? tbs6812::DeliverySystem::ISDBS : tbs6812::DeliverySystem::ISDBS3;
+        bootstrapFrequency_=GetPrivateProfileIntW(L"TBS6812",L"BootstrapFrequencyKHz",473143,path);
         if(Terrestrial() && warmStart_) {
             warmStart_=false;
-            Log("ISDB-T cached takeover is not enabled; vendor preparation is required on each open");
+            Log("Terrestrial-side cached takeover is not enabled; vendor preparation is required on each open");
         }
         wchar_t directory[MAX_PATH]{};
         GetPrivateProfileStringW(L"TBS6812",L"WarmStartCacheDirectory",L"",directory,MAX_PATH,path);
@@ -168,7 +173,8 @@ public:
     const HRESULT InitializeHook() override {
         std::lock_guard<std::mutex> guard(mutex_);
         try {
-            if(!validSystem_) throw std::runtime_error("DeliverySystem must be ISDB-T, ISDB-S or ISDB-S3");
+            if(!validSystem_) throw std::runtime_error("DeliverySystem must be ISDB-T, ISDB-S, ISDB-S3 or J.83B");
+            if(Cable() && !tbs6812::Cxd2857::ValidFrequency(bootstrapFrequency_,tbs6812::DeliverySystem::ISDBT)) throw std::runtime_error("invalid ISDB-T BootstrapFrequencyKHz");
             if(tunerIndex_<0) throw std::runtime_error("only PCI TBS6812 Tuner 0/1 is supported");
             // Stable device-path hash keeps claims independent across slots and cards.
             uint64_t hash=14695981039346656037ULL;
@@ -242,7 +248,7 @@ public:
                     Log("bootstrap requires an absolute TSID; relative TS indices are supported after adoption only");
                     return E_INVALIDARG;
                 }
-                bootstrap_=*p; bootstrapPending_=true;
+                bootstrap_=Cable() && cableRequested_ ? *cableRequested_ : *p; bootstrapPending_=true;
                 const HRESULT hr=SetLNBPower(true); if(FAILED(hr)) throw std::runtime_error("LNB preparation failed: "+HResult(hr));
                 Log("bootstrap: returning E_NOINTERFACE for the initial vendor tune only");
                 return E_NOINTERFACE;
@@ -260,8 +266,23 @@ public:
             return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
         } catch(const std::exception& e) { return Error("direct tune",e); }
     }
+    const HRESULT PreLockChannel(TuningParam* p) override {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if(!Cable() || fatal_ || !chip_ || chip_->Adopted()) return S_OK;
+        if(!Supported(p) || p->Frequency<90000 || p->Frequency>770000) return E_INVALIDARG;
+        cableRequested_=*p; substitutedParam_=p;
+        p->Frequency=long(bootstrapFrequency_);
+        p->Modulation.Modulation=BDA_MOD_ISDB_T_TMCC;
+        p->Modulation.SymbolRate=-1; p->Modulation.BandWidth=6;
+        p->Modulation.InnerFEC=BDA_FEC_VITERBI; p->Modulation.InnerFECRate=BDA_BCC_RATE_3_4;
+        p->Modulation.OuterFEC=BDA_FEC_RS_204_188; p->Modulation.OuterFECRate=BDA_BCC_RATE_NOT_SET;
+        p->ONID=-1; p->TSID=-1; p->SID=-1;
+        Log("J.83B bootstrap: substitute complete ISDB-T tuning parameters at RF_kHz="+std::to_string(bootstrapFrequency_));
+        return S_OK;
+    }
     const HRESULT PostLockChannel(const TuningParam*) override {
         std::lock_guard<std::mutex> guard(mutex_);
+        if(substitutedParam_ && cableRequested_) { *substitutedParam_=*cableRequested_; substitutedParam_=nullptr; }
         if(!bootstrapPending_ || !chip_ || fatal_) return S_OK;
         bootstrapPending_=false;
         try {
@@ -271,8 +292,33 @@ public:
                 Log("ISDB-T vendor bootstrap did not lock: no takeover; next channel will retry vendor preparation");
                 return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
             }
-            chip_->Adopt(IF(bootstrap_),Stream(bootstrap_));
+            chip_->Adopt(Cable()?bootstrapFrequency_:IF(bootstrap_),Stream(bootstrap_));
             originalRecord_=tbs6812::WarmStartRecord{IF(bootstrap_),Stream(bootstrap_),system_};
+            if(Cable()) {
+                try {
+                    // The vendor can finish delayed acquisition work after TuneRequest returns.
+                    // Keep its own terrestrial carrier locked before taking over another core.
+                    const auto settlingStart=std::chrono::steady_clock::now();
+                    auto stableSince=settlingStart;
+                    bool stable=false;
+                    while(std::chrono::steady_clock::now()-settlingStart<std::chrono::seconds(5)) {
+                        Sleep(20);
+                        const auto now=std::chrono::steady_clock::now();
+                        if(!chip_->Locked()) stableSince=now;
+                        else if(now-stableSince>=std::chrono::milliseconds(1200)) { stable=true; break; }
+                    }
+                    if(!stable) throw std::runtime_error("ISDB-T bootstrap did not settle before J.83B takeover");
+                    chip_->BeginJ83B();
+                    chip_->Tune(IF(bootstrap_),0);
+                    const auto start=std::chrono::steady_clock::now();
+                    do {
+                        if(chip_->Locked()) { Log("J.83B 5.6 Msym/s locked after ISDB-T preparation"); return S_OK; }
+                        Sleep(5);
+                    } while(std::chrono::steady_clock::now()-start<std::chrono::milliseconds(lockTimeout_));
+                    Log("J.83B did not lock; check optical signal and channel frequency; later direct tunes remain available");
+                    return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+                } catch(...) { fatal_=true; throw; }
+            }
             Inspect("after-vendor");
             Log("bootstrap adopted: CXD2857ER already active; no chip reset or clock reinitialization");
             return S_OK;
@@ -292,6 +338,7 @@ public:
         std::lock_guard<std::mutex> guard(mutex_);
         if(!value) return E_POINTER;
         *value=0; if(!chip_ || !chip_->Adopted()) return E_NOINTERFACE;
+        if(Cable()) Inspect("J83B-signal-check");
         try { if(chip_->Locked()) *value=chip_->CNR(); return S_OK; }
         catch(...) { return S_OK; } // unavailable C/N is not a fabricated measurement
     }

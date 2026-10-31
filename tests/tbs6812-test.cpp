@@ -14,7 +14,7 @@ struct FakeBus final : I2cBus {
     std::map<std::tuple<int,int,int>,uint8_t> registers;
     uint8_t banks[256]{};
     std::vector<std::pair<uint8_t,Bytes>> writes;
-    bool failNextTuner=false, failMonitor=false;
+    bool failNextTuner=false, failMonitor=false, failCableWake=false;
     FakeBus() {
         registers[{0x66,0,0xfb}]=0; registers[{0x66,0,0xfd}]=0x91;
         registers[{0x66,0,0x17}]=0x0d; registers[{0x66,0,0x14}]=1;
@@ -24,12 +24,13 @@ struct FakeBus final : I2cBus {
     }
     void Write(uint8_t address,const Bytes& data) override {
         if((address==0x60 || address==0x61) && failNextTuner) { failNextTuner=false; throw std::runtime_error("injected tuner write failure"); }
+        if(failCableWake && address==0x64 && banks[address]==0x40 && data[0]==0x21) { failCableWake=false; throw std::runtime_error("injected cable wake failure"); }
         Require(data.size()>=2,"empty register write"); writes.emplace_back(address,data);
         if(address!=0x60 && address!=0x61 && data[0]==0) { banks[address]=data[1]; return; }
         for(size_t i=1;i<data.size();++i) registers[{address,banks[address],data[0]+int(i)-1}]=data[i];
     }
     Bytes Read(uint8_t address,uint8_t reg,size_t length) override {
-        if(failMonitor && address==0x64 && ((banks[address]==0xd0 && reg==0xf3) || (banks[address]==0x60 && reg==0x28))) throw std::runtime_error("injected monitor failure");
+        if(failMonitor && address==0x64 && ((banks[address]==0xd0 && reg==0xf3) || (banks[address]==0x60 && reg==0x28) || (banks[address]==0x40 && reg==0x4c))) throw std::runtime_error("injected monitor failure");
         Bytes answer(length); for(size_t i=0;i<length;++i) answer[i]=registers[{address,banks[address],reg+int(i)}]; return answer;
     }
     uint8_t At(int address,int bank,int reg) { return registers[{address,bank,reg}]; }
@@ -168,6 +169,54 @@ int main() {
         Cxd2857 wrongBandChip(wrongBand,0,DeliverySystem::ISDBT);
         rejected=false; try { wrongBandChip.Adopt(473143,0); } catch(...) { rejected=true; }
         Require(rejected && !wrongBandChip.Adopted(),"ISDB-T rejects non-6-MHz preparation");
+        FakeBus cable;
+        cable.registers[{0x66,0,0x17}]=6; cable.registers[{0x64,0,0xa9}]=0;
+        cable.registers[{0x64,0x10,0xd7}]=4; cable.registers[{0x64,0x60,0x10}]=3;
+        cable.registers[{0x64,0,0xd3}]=0xa5; cable.registers[{0x64,0,0x33}]=0xb6;
+        cable.registers[{0x64,0x10,0xb6}]=0x12; cable.registers[{0x64,0x10,0xb7}]=0xee;
+        cable.registers[{0x64,0x10,0xb8}]=0xef;
+        Cxd2857 cableChip(cable,0,DeliverySystem::J83B);
+        cableChip.Adopt(473143,0);
+        const auto originalDemod=cable.registers;
+        cableChip.BeginJ83B();
+        Require(cable.At(0x66,0,0x17)==8 && cable.At(0x64,0x40,0x14)==0x10 &&
+            cable.At(0x64,0x40,0x26)==7 && cable.At(0x64,0x40,0x27)==0x77 &&
+            cable.At(0x64,0x10,0xb6)==0x14 && cable.At(0x64,0x10,0xb7)==0,"J.83B 5.6 Msym/s core and IF");
+        Require(!cableChip.Locked(),"J.83B never reports old ISDB-T lock");
+        cable.registers[{0x64,0x40,0x88}]=1;
+        Require(!cableChip.Locked(),"J.83B sync alone is not TS lock");
+        cable.registers[{0x64,0x40,0x10}]=0x20;
+        Require(cableChip.Locked(),"J.83B requires QAM sync and TS lock");
+        cable.registers[{0x66,0,0x17}]=6;
+        Require(!cableChip.Locked(),"stale QAM flags never report lock after a vendor core change");
+        cable.registers[{0x66,0,0x17}]=8;
+        cableChip.Tune(314250,0);
+        Require(cable.At(0x60,0,0x69)==0x83 && cable.At(0x60,0,0x6b)==9 &&
+            cable.At(0x60,0,0x6e)==4 && cable.At(0x60,0,0x6f)==8,"J.83B optical Freia row");
+        cable.registers[{0x64,0x40,0x19}]=4; // 256-QAM
+        cable.registers[{0x64,0x40,0x4c}]=1; cable.registers[{0x64,0x40,0x4d}]=0;
+        Require(std::fabs(cableChip.CNR()-43.2618f)<0.001f,"J.83B QAM C/N conversion");
+        cable.failMonitor=true; rejected=false; try { cableChip.CNR(); } catch(...) { rejected=true; }
+        Require(rejected && cable.At(0x64,0,1)==0,"J.83B C/N failure releases freeze");
+        // Ignore monitor fixture values when comparing writable control registers.
+        for(const auto& key : {std::make_tuple(0x64,0x40,0x88),std::make_tuple(0x64,0x40,0x10),
+            std::make_tuple(0x64,0x40,0x19),std::make_tuple(0x64,0x40,0x4c),std::make_tuple(0x64,0x40,0x4d)}) cable.registers[key]=0;
+        cableChip.Restore();
+        for(const auto& entry:cable.registers) {
+            const auto [address,bank,reg]=entry.first;
+            if((address!=0x64 && address!=0x66) || (address==0x64 && bank==0 && reg==0xfe) ||
+                (address==0x66 && bank==0 && reg==8)) continue;
+            const auto found=originalDemod.find(entry.first);
+            Require(entry.second==(found==originalDemod.end()?0:found->second),"J.83B restore preserves all touched vendor demodulator registers");
+        }
+        Require(cable.At(0x60,0,0x69)==0x87 && cable.At(0x60,0,0x6e)==0x17 &&
+            cable.At(0x64,0,0xc3)==0,"J.83B close restores terrestrial RF row and TS output");
+        for(const auto& w:cable.writes) if(w.first==0x66) Require(w.second[0]!=2 && w.second[0]!=0x14,"J.83B never cold-resets or changes shared reference");
+        cable.failCableWake=true; rejected=false; try { cableChip.BeginJ83B(); } catch(...) { rejected=true; }
+        Require(rejected,"partial J.83B transition failure propagated");
+        cableChip.Restore();
+        Require(cable.At(0x66,0,0x17)==6 && cable.At(0x64,0x10,0xb6)==0x12 &&
+            cable.At(0x64,0,0xc3)==0,"partial J.83B transition restores ISDB-T core/IF/output");
         const auto path=std::filesystem::temp_directory_path()/("tbs6812-cache-test-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".state");
         struct Cleanup { std::filesystem::path path; ~Cleanup(){std::error_code error;std::filesystem::remove(path,error);} } cleanup{path};
         Require(!ReadWarmRecord(path,17),"missing cache rejected");
@@ -192,7 +241,7 @@ int main() {
         Require(!ReadWarmRecord(path,17),"malformed cache rejected");
         { std::ofstream oversized(path); oversized<<std::string(300,'x'); }
         Require(!ReadWarmRecord(path,17),"oversized cache rejected");
-        std::cout<<"PASS: ISDB-T RF/lock/CNR/restore/cache, IF/ID validation, warm restore, I2C failures, independent RF addresses, cached hardware guards, cache validation\n";
+        std::cout<<"PASS: J.83B core/RF/CNR/transactional restore, ISDB-T RF/lock/CNR/restore/cache, IF/ID validation, warm restore, I2C failures, independent RF addresses, cached hardware guards, cache validation\n";
         return 0;
     } catch(const std::exception& e) { std::cerr<<"FAIL: "<<e.what()<<'\n'; return 1; }
 }
