@@ -54,3 +54,26 @@ foreach($case in $cases) {
     }
     Write-Output "PASS $($case.Name): $($rows.Count) channels, indices/names/frequencies match"
 }
+
+# Verify that the combined template still exposes both spaces through the real DLL.
+$stage=Join-Path $repo 'work\opticast-test\terrestrial-combined'
+New-Item -ItemType Directory -Force $stage | Out-Null
+$dll=Join-Path $stage 'BonDriver_Test.dll'
+Copy-Item (Join-Path $repo 'x64\Release_Static\BonDriver_BDA.dll') $dll
+$ini=[IO.File]::ReadAllText((Join-Path $repo 'config\BonDriver_TBS6812_T.ini')).Replace('DebugLog=0','DebugLog=1')
+[IO.File]::WriteAllText((Join-Path $stage 'BonDriver_Test.ini'),$ini)
+$logPath=Join-Path $stage 'BonDriver_Test.log'
+if(Test-Path -LiteralPath $logPath){Remove-Item -LiteralPath $logPath}
+$listed=@(& $probe $dll)
+if($LASTEXITCODE -ne 0){throw 'Combined enumeration failed'}
+$uhf=@($listed | Where-Object {$_ -match '^0\t'})
+$optical=@($listed | Where-Object {$_ -match '^1\t'})
+if($uhf.Count -ne 40 -or $optical.Count -ne 109){throw 'Combined template must have 40 UHF (13..52) and 109 optical channels'}
+$log=[IO.File]::ReadAllText($logPath)
+$rows=[regex]::Matches($log,'(?m)^TUNINGSPACE01: \(auto\) CH(\d+)=\d+,(\d+)\.(\d+),[^,]*,1,([^,\r\n]+),')
+if($rows.Count -ne 109){throw 'Combined optical space must use modulation profile 1'}
+for($i=0;$i -lt $rows.Count;$i++) {
+    $frequency=[int]$rows[$i].Groups[2].Value*1000+[int]$rows[$i].Groups[3].Value
+    if([int]$rows[$i].Groups[1].Value -ne $i -or $frequency -ne $reference[$i].Frequency){throw "Combined optical channel mismatch: $i"}
+}
+Write-Output 'PASS terrestrial-combined: UHF space 0 and 109 optical channels in space 1'

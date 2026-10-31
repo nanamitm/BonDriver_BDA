@@ -17,6 +17,8 @@ dantto4kには通さない。
 - `TBS6812.dll`
 
 例えば `BonDriver_BDA.T.dll` と `BonDriver_BDA.T.ini` の組み合わせで使う。
+現在のテンプレートは地デジとJ.83Bを共用する構成。[共用設定](tbs6812-terrestrial-combined.md)を参照。
+地デジだけに固定する従来のDeliverySystem="ISDB-T"設定も引き続き使用できる。
 本番TVTest/EDCBにはまだ配置していない。
 
 ```ini
