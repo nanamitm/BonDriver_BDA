@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$VCToolsVersion = '14.44.35207',
+    [string]$VCToolsVersion = '',
     [string]$PlatformToolset = 'v143'
 )
 $ErrorActionPreference = 'Stop'
@@ -8,8 +8,13 @@ $repo = Split-Path $PSScriptRoot -Parent
 $locator = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 $installation = & $locator -latest -products '*' -requires Microsoft.Component.MSBuild -property installationPath
 if (!$installation) { throw 'Visual Studio MSBuild was not found.' }
-$atl = Join-Path $installation "VC\Tools\MSVC\$VCToolsVersion\atlmfc\include\atlbase.h"
-if (!(Test-Path -LiteralPath $atl)) { throw "ATL headers were not found: $atl" }
+if (!$VCToolsVersion) {
+    # Newest compiler that also has the ATL headers the extension needs.
+    $VCToolsVersion = Get-ChildItem (Join-Path $installation 'VC\Tools\MSVC') -Directory |
+        Where-Object { $_.Name -like '14.4*' -and (Test-Path -LiteralPath (Join-Path $_.FullName 'atlmfc\include\atlbase.h')) } |
+        Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1 -ExpandProperty Name
+    if (!$VCToolsVersion) { throw 'MSVC 14.4x tools with ATL headers were not found.' }
+}
 $msbuild = Join-Path $installation 'MSBuild\Current\Bin\MSBuild.exe'
 $logs = Join-Path $repo 'work\build-logs'
 New-Item -ItemType Directory -Path $logs -Force | Out-Null
