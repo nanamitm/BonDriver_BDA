@@ -1,5 +1,6 @@
-// Copyright (c) Sony; TurboSight; 2026 Till0196
-// C++ adaptation of coax CXD2857ER satellite/terrestrial tuning and monitors.
+// Copyright (c) Sony; TurboSight; 2026 Till0196; 2024 otya; 2021 Davin zhang
+// C++ adaptation of coax CXD2857ER satellite/terrestrial tuning and monitors,
+// and of the tbs6812_drv core sleep and wake sequences.
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "Cxd2857.h"
 #include "CnrTable.h"

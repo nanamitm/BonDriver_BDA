@@ -6,15 +6,12 @@
 #include <optional>
 #include <stdexcept>
 #include "Cxd2857.h"
-#include "BoardModeSwitch.h"
 
 namespace tbs6812 {
-inline uint8_t BoardModeFor(DeliverySystem system) {
-    return system==DeliverySystem::ISDBT || system==DeliverySystem::J83B ? BoardModeTerrestrial : BoardModeSatellite;
-}
+constexpr uint8_t BoardModeTerrestrial=1, BoardModeSatellite=2;
 struct SystemRouting {
     bool combined=false;
-    bool mixed=false; // Terrestrial and satellite spaces; each graph serves one board mode.
+    bool direct=false; // All systems on a satellite-mode input: the chip moves between them.
     DeliverySystem fixed=DeliverySystem::ISDBS3;
     std::map<uint32_t,DeliverySystem> spaces;
     static std::optional<DeliverySystem> Parse(const wchar_t* value) {
@@ -29,12 +26,11 @@ struct SystemRouting {
         wchar_t legacy[64]{},value[64]{};
         GetPrivateProfileStringW(L"TBS6812",L"SatelliteSystem",L"ISDB-S3",legacy,64,path);
         GetPrivateProfileStringW(L"TBS6812",L"DeliverySystem",legacy,value,64,path);
-        const bool withS3=!_wcsicmp(value,L"ISDB-T/J.83B/ISDB-S/ISDB-S3");
-        result.mixed=withS3 || !_wcsicmp(value,L"ISDB-T/J.83B/ISDB-S");
-        result.combined=result.mixed || !_wcsicmp(value,L"ISDB-T/J.83B");
+        result.direct=!_wcsicmp(value,L"ISDB-T/J.83B/ISDB-S/ISDB-S3");
+        result.combined=result.direct || !_wcsicmp(value,L"ISDB-T/J.83B");
         if(!result.combined) {
             const auto system=Parse(value);
-            if(!system) throw std::runtime_error("DeliverySystem must be ISDB-T, J.83B, ISDB-S, ISDB-S3, ISDB-T/J.83B, ISDB-T/J.83B/ISDB-S or ISDB-T/J.83B/ISDB-S/ISDB-S3");
+            if(!system) throw std::runtime_error("DeliverySystem must be ISDB-T, J.83B, ISDB-S, ISDB-S3, ISDB-T/J.83B or ISDB-T/J.83B/ISDB-S/ISDB-S3");
             result.fixed=*system;
             return result;
         }
@@ -45,9 +41,8 @@ struct SystemRouting {
             GetPrivateProfileStringW(section,L"DeliverySystem",L"",value,64,path);
             if(!*value) continue;
             const auto system=Parse(value);
-            if(!system || (*system!=DeliverySystem::ISDBT && *system!=DeliverySystem::J83B && !(result.mixed && *system==DeliverySystem::ISDBS) && !(withS3 && *system==DeliverySystem::ISDBS3)))
-                throw std::runtime_error(result.mixed ? "this mixed DeliverySystem does not accept the tuning space's delivery system"
-                                                      : "combined terrestrial tuning spaces accept only ISDB-T or J.83B");
+            if(!system || (*system!=DeliverySystem::ISDBT && *system!=DeliverySystem::J83B && !result.direct))
+                throw std::runtime_error("combined terrestrial tuning spaces accept only ISDB-T or J.83B");
             result.spaces.emplace(i,*system);
         }
         if(result.spaces.empty()) throw std::runtime_error("combined mode requires DeliverySystem in each tuning space");

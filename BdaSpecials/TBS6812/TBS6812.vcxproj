@@ -8,6 +8,6 @@
   <PropertyGroup><OutDir>$(SolutionDir)x64\$(Configuration)\</OutDir><IntDir>$(Platform)\$(Configuration)\</IntDir><TargetName>TBS6812</TargetName></PropertyGroup>
   <ItemDefinitionGroup><ClCompile><WarningLevel>Level4</WarningLevel><Optimization>MaxSpeed</Optimization><RuntimeLibrary>MultiThreaded</RuntimeLibrary><LanguageStandard>stdcpp17</LanguageStandard><PreprocessorDefinitions>WIN32;_WINDOWS;_USRDLL;UNICODE;_UNICODE;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>..\..\common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><ExceptionHandling>Sync</ExceptionHandling><RuntimeTypeInfo>true</RuntimeTypeInfo></ClCompile><Link><AdditionalDependencies>strmiids.lib;ole32.lib;oleaut32.lib;%(AdditionalDependencies)</AdditionalDependencies><GenerateDebugInformation>true</GenerateDebugInformation><SubSystem>Windows</SubSystem></Link></ItemDefinitionGroup>
   <ItemGroup><ClCompile Include="TBS6812.cpp"/><ClCompile Include="Cxd2857.cpp"/></ItemGroup>
-  <ItemGroup><ClInclude Include="Cxd2857.h"/><ClInclude Include="CnrTable.h"/><ClInclude Include="WarmStartCache.h"/><ClInclude Include="SystemRouting.h"/><ClInclude Include="BoardModeSwitch.h"/></ItemGroup>
+  <ItemGroup><ClInclude Include="Cxd2857.h"/><ClInclude Include="CnrTable.h"/><ClInclude Include="WarmStartCache.h"/><ClInclude Include="SystemRouting.h"/></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

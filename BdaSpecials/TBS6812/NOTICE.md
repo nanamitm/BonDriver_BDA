@@ -15,13 +15,21 @@ are adapted from Till0196/coax, commit 2ef4838227f5c8f968f9acd74161c0437a165dc6:
 
 https://github.com/Till0196/coax/tree/2ef4838227f5c8f968f9acd74161c0437a165dc6
 
+The demodulator core sleep and wake sequences used to move between delivery systems
+(ISDB-T, ISDB-S, ISDB-S3) and the TS/TLV clock settings are adapted from otya128/tbs6812_drv,
+commit 53bcdf77fc70ac3f9fb3e1890b21df56c7a1f892, file cxd2857er.c (GPL-2.0-or-later):
+
+https://github.com/otya128/tbs6812_drv/tree/53bcdf77fc70ac3f9fb3e1890b21df56c7a1f892
+
+Copyright (c) 2024 otya; 2021 Davin zhang, TurboSight.
+
 Copyright (c) Sony; TurboSight; 2026 Till0196. These adaptations are distributed
 under GPL-2.0-or-later. See COPYING. No external firmware is included.
 
 This extension adopts a vendor-initialized, active ISDB-T, ISDB-S or ISDB-S3 demodulator.
 J.83B 5.6 Msym/s borrows the prepared ISDB-T core and restores its state on close.
-It intentionally does not port the cold initialization, PLL, GPIO,
-or direct satellite/terrestrial side transitions. ISDB-T retains the vendor-prepared 6 MHz
+It intentionally does not port the cold initialization, PLL or GPIO sequences.
+ISDB-T retains the vendor-prepared 6 MHz
 filter/IF coefficients and ports the per-channel terrestrial RF sequence only. It does not bypass conditional-access processing;
 TVTest/EDCB handles conventional TS access, and the existing dantto4k/card path
 handles S3 access.
