@@ -4,7 +4,7 @@ param()
 $ErrorActionPreference='Stop'
 $repo=Split-Path $PSScriptRoot -Parent
 $probe=Join-Path $repo 'work\bon-driver-list.exe'
-$template=[IO.File]::ReadAllText((Join-Path $repo 'config\BonDriver_TBS6812_J83B.ini')).Replace('DebugLog=0','DebugLog=1')
+$template=[IO.File]::ReadAllText((Join-Path $repo 'tests\fixtures\BonDriver_TBS6812_J83B.ini')).Replace('DebugLog=0','DebugLog=1')
 $reference=@(Get-Content (Join-Path $repo 'tests\fixtures\opticast-frequencies.tsv') | Where-Object {$_ -notmatch '^#' -and $_.Trim()} | ForEach-Object {
     $fields=$_ -split "`t"
     [pscustomobject]@{Physical=$fields[1];Frequency=[int]$fields[2]}

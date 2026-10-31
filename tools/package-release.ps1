@@ -16,7 +16,7 @@ try {
     # A missing file fails the package instead of shipping an incomplete release.
     Copy-Item -LiteralPath (Join-Path $artifacts 'BonDriver_BDA.dll'), (Join-Path $artifacts 'TBS6812.dll') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $repo 'work\tbs6812-board-mode.exe') -Destination (Join-Path $stage 'tools')
-    Copy-Item -Path (Join-Path $repo 'config\BonDriver_TBS6812_*.ini') -Destination (Join-Path $stage 'config')
+    Copy-Item -Path (Join-Path $repo 'config\BonDriver_TBS6812*.ini') -Destination (Join-Path $stage 'config')
     foreach ($document in 'tbs6812-all', 'tbs6812-direct', 'tbs6812-isdb-s', 'tbs6812-isdb-t', 'tbs6812-j83b') {
         Copy-Item -LiteralPath (Join-Path $repo "doc\$document.md") -Destination (Join-Path $stage 'doc')
     }

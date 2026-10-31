@@ -439,10 +439,119 @@ public:
 };
 }
 
+namespace {
+const GUID networkProviderClass = {0xb2f3a67c,0x29da,0x4c78,{0x88,0x31,0x09,0x1e,0xd5,0x09,0xa4,0x75}};
+const GUID tunerCategory = {0x71985f48,0x1ca1,0x11d3,{0x9c,0xc8,0x00,0xc0,0x4f,0x79,0x71,0xe0}};
+struct BoardTuner { std::wstring display; CComPtr<IMoniker> moniker; };
+CComPtr<IPin> FirstPin(IBaseFilter* filter,PIN_DIRECTION wanted) {
+    CComPtr<IEnumPins> pins;
+    if(FAILED(filter->EnumPins(&pins))) return {};
+    for(;;) {
+        CComPtr<IPin> pin; PIN_DIRECTION direction{};
+        if(pins->Next(1,&pin,nullptr)!=S_OK) return {};
+        if(SUCCEEDED(pin->QueryDirection(&direction)) && direction==wanted) return pin;
+    }
+}
+class BoardAccess { // Only the network provider and tuner: the capture chain will not build in the mode being left.
+    CComPtr<IGraphBuilder> graph_;
+    CComPtr<IBaseFilter> provider_,tuner_;
+public:
+    CComPtr<IKsPropertySet> property;
+    explicit BoardAccess(IMoniker* moniker) {
+        if(FAILED(graph_.CoCreateInstance(CLSID_FilterGraph,nullptr,CLSCTX_INPROC_SERVER)) ||
+            FAILED(provider_.CoCreateInstance(networkProviderClass,nullptr,CLSCTX_INPROC_SERVER)) ||
+            FAILED(graph_->AddFilter(provider_,L"Network Provider")) ||
+            FAILED(moniker->BindToObject(nullptr,nullptr,IID_IBaseFilter,reinterpret_cast<void**>(&tuner_))) ||
+            FAILED(graph_->AddFilter(tuner_,L"Tuner"))) throw std::runtime_error("cannot build the board access graph");
+        const auto output=FirstPin(provider_,PINDIR_OUTPUT), input=FirstPin(tuner_,PINDIR_INPUT);
+        if(!output || !input || FAILED(graph_->Connect(output,input))) throw std::runtime_error("cannot connect the board access graph");
+        property=Properties(tuner_);
+    }
+};
+// Tuners 0 and 1 of the first card found.
+bool FindBoard(BoardTuner (&tuners)[2]) {
+    CComPtr<ICreateDevEnum> devices; CComPtr<IEnumMoniker> monikers;
+    if(FAILED(devices.CoCreateInstance(CLSID_SystemDeviceEnum,nullptr,CLSCTX_INPROC)) ||
+        devices->CreateClassEnumerator(tunerCategory,&monikers,CDEF_DEVMON_PNP_DEVICE)!=S_OK) return false;
+    std::wstring board;
+    for(;;) {
+        CComPtr<IMoniker> moniker;
+        if(monikers->Next(1,&moniker,nullptr)!=S_OK) break;
+        LPOLESTR name=nullptr;
+        if(FAILED(moniker->GetDisplayName(nullptr,nullptr,&name))) continue;
+        const auto display=Lower(name); CoTaskMemFree(name);
+        CComPtr<IPropertyBag> bag; CComVariant friendly;
+        if(FAILED(moniker->BindToStorage(nullptr,nullptr,IID_IPropertyBag,reinterpret_cast<void**>(&bag))) ||
+            FAILED(bag->Read(L"FriendlyName",&friendly,nullptr)) || friendly.vt!=VT_BSTR) continue;
+        const int slot=Target(display.c_str(),friendly.bstrVal);
+        if(slot<0 || (!board.empty() && BoardPath(display.c_str())!=board)) continue;
+        board=BoardPath(display.c_str());
+        tuners[slot]={display,moniker};
+    }
+    return tuners[0].moniker && tuners[1].moniker;
+}
+// The object BonDriver_BDA holds while it uses a tuner, visible across sessions.
+class TunerClaim {
+    HANDLE handle_=nullptr;
+public:
+    explicit TunerClaim(std::wstring display) {
+        std::replace(display.begin(),display.end(),L'\\',L'/');
+        handle_=CreateSemaphoreW(nullptr,1,1,(L"Global\\"+display).c_str());
+        if(handle_ && WaitForSingleObject(handle_,0)!=WAIT_OBJECT_0) { CloseHandle(handle_); handle_=nullptr; }
+    }
+    ~TunerClaim() { if(handle_) { ReleaseSemaphore(handle_,1,nullptr); CloseHandle(handle_); } }
+    TunerClaim(const TunerClaim&)=delete;
+    TunerClaim& operator=(const TunerClaim&)=delete;
+    explicit operator bool() const { return handle_!=nullptr; }
+};
+bool ReadBoardModes(IMoniker* moniker,BYTE* modes) {
+    BoardAccess access(moniker);
+    DWORD returned=0;
+    return SUCCEEDED(access.property->Get(accessSet,0x3c,nullptr,0,modes,8,&returned)) && returned>=2;
+}
+}
+
 // Keep thread notifications enabled: this project links the static CRT.
 BOOL WINAPI DllMain(HINSTANCE module,DWORD reason,LPVOID) { if(reason==DLL_PROCESS_ATTACH) selfModule=module; return TRUE; }
 extern "C" __declspec(dllexport) HRESULT CheckAndInitTuner(IBaseFilter*,const WCHAR* display,const WCHAR* friendly,const WCHAR*) {
     return Target(display,friendly)>=0?S_OK:E_INVALIDARG;
+}
+// Before a graph is built: puts both inputs in satellite mode for direct switching, once, while the card is free.
+// S_OK means the card restarted, so devices must be enumerated again.
+extern "C" __declspec(dllexport) HRESULT PrepareBoardForOpen(const WCHAR* path) {
+    try {
+        if(!tbs6812::SystemRouting::Read(path).direct || !GetPrivateProfileIntW(L"TBS6812",L"AutoBoardMode",1,path)) return S_FALSE;
+        BoardTuner tuners[2];
+        if(!FindBoard(tuners)) return S_FALSE;
+        TunerClaim first(tuners[0].display), second(tuners[1].display);
+        if(!first || !second) return S_FALSE;
+        BYTE modes[8]{};
+        if(!ReadBoardModes(tuners[0].moniker,modes)) return S_FALSE;
+        if(modes[0]==tbs6812::BoardModeSatellite && modes[1]==tbs6812::BoardModeSatellite) return S_FALSE;
+        WriteLog("board mode "+std::to_string(modes[0])+","+std::to_string(modes[1])+" written to 2,2 for direct switching; the card restarts");
+        BYTE wanted[2]{tbs6812::BoardModeSatellite,tbs6812::BoardModeSatellite};
+        {
+            BoardAccess access(tuners[0].moniker);
+            const HRESULT hr=access.property->Set(accessSet,0x3c,wanted,sizeof(wanted),wanted,sizeof(wanted));
+            if(FAILED(hr)) throw std::runtime_error("write the board modes: "+HResult(hr));
+        }
+        const auto start=std::chrono::steady_clock::now();
+        while(std::chrono::steady_clock::now()-start<std::chrono::seconds(45)) {
+            // The card leaves and returns; failures are expected until a matching reading.
+            MsgWaitForMultipleObjects(0,nullptr,FALSE,500,QS_ALLINPUT);
+            MSG message;
+            while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); }
+            try {
+                BoardTuner current[2]; BYTE now[8]{};
+                if(FindBoard(current) && ReadBoardModes(current[0].moniker,now) && now[0]==wanted[0] && now[1]==wanted[1]) {
+                    WriteLog("board mode ready");
+                    return S_OK;
+                }
+            } catch(const std::exception&) {}
+        }
+        WriteLog("board mode: the card did not return in satellite mode");
+        return E_FAIL;
+    } catch(const std::exception& e) { WriteLog(std::string("board mode: ")+e.what()); return E_FAIL; }
 }
 extern "C" __declspec(dllexport) HRESULT CheckCapture(const WCHAR* tunerDisplay,const WCHAR* tunerFriendly,const WCHAR* captureDisplay,const WCHAR* captureFriendly,const WCHAR*) {
     const int index=Target(tunerDisplay,tunerFriendly);

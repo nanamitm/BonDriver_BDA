@@ -1,5 +1,7 @@
 # TBS6812 conventional ISDB-S support
 
+Current setup: ISDB-S is part of [tbs6812-all.md](tbs6812-all.md). This page records the control details. `DeliverySystem="ISDB-S"` still selects it alone.
+
 Implemented on `codex/tbs6812-isdb-s`, based on merged master `2a3871e`.
 The earlier S3 work was merged through PR #1 before creating this branch.
 
@@ -86,10 +88,6 @@ data filtering remains a shared S/S3 follow-up; this change does not solve it.
 
 The reproducible opt-in two-slot test is:
 
-```powershell
-# Both TBS6812 slots must be free. Leaves production application files untouched.
-./tools/test-satellite-tbs6812.ps1 -RunHardwareTests
-```
 
 It stages the current binaries and pinned configurations under work/, captures
 S/S and mixed-system reception, and checks probe success/normal unloading.

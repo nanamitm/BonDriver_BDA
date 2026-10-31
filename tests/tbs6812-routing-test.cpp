@@ -42,7 +42,7 @@ int main() {
         const auto deployed=SystemRouting::Read(std::filesystem::absolute("config/BonDriver_TBS6812_T.ini").c_str());
         Require(deployed.combined && deployed.ForSpace(0)==DeliverySystem::ISDBT &&
             deployed.ForSpace(1)==DeliverySystem::J83B,"shipped combined template has both systems");
-        const auto shippedS3=SystemRouting::Read(std::filesystem::absolute("config/BonDriver_TBS6812_TS3.ini").c_str());
+        const auto shippedS3=SystemRouting::Read(std::filesystem::absolute("config/BonDriver_TBS6812_Inner.ini").c_str());
         Require(shippedS3.direct && shippedS3.ForSpace(0)==DeliverySystem::ISDBT && shippedS3.ForSpace(1)==DeliverySystem::J83B && shippedS3.ForSpace(2)==DeliverySystem::ISDBS &&
             shippedS3.ForSpace(3)==DeliverySystem::ISDBS && shippedS3.ForSpace(4)==DeliverySystem::ISDBS3,"shipped S3 template maps all spaces");
         std::cout<<"PASS: INI routing, legacy defaults, combined spaces and invalid/missing mapping guards\n";
