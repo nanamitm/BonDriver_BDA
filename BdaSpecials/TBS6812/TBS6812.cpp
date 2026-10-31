@@ -514,6 +514,9 @@ BOOL WINAPI DllMain(HINSTANCE module,DWORD reason,LPVOID) { if(reason==DLL_PROCE
 extern "C" __declspec(dllexport) HRESULT CheckAndInitTuner(IBaseFilter*,const WCHAR* display,const WCHAR* friendly,const WCHAR*) {
     return Target(display,friendly)>=0?S_OK:E_INVALIDARG;
 }
+static DWORD BoardSwitchTimeout(const WCHAR* path) {
+    return std::clamp<DWORD>(GetPrivateProfileIntW(L"TBS6812",L"BoardModeSwitchTimeoutMs",45000,path),5000,120000);
+}
 // CheckAndInitTuner for a graph serving one tuning space: skip inputs in the other board mode.
 extern "C" __declspec(dllexport) HRESULT CheckAndInitTunerForSpace(IBaseFilter* tuner,const WCHAR* display,const WCHAR* friendly,const WCHAR* path,DWORD space) {
     const int slot=Target(display,friendly);
@@ -527,24 +530,37 @@ extern "C" __declspec(dllexport) HRESULT CheckAndInitTunerForSpace(IBaseFilter* 
         return modes[slot]==tbs6812::BoardModeFor(*system) ? S_OK : E_INVALIDARG;
     } catch(const std::exception& e) { WriteLog(std::string("check tuner mode: ")+e.what()); return E_FAIL; }
 }
-// Aligns both inputs with a space's board mode when no other receiver holds the card.
+// Prepares an input in a space's board mode when no other receiver holds the card.
 // HRESULT_FROM_WIN32(ERROR_BUSY) before closeGraph runs leaves the caller's graph untouched.
-extern "C" __declspec(dllexport) HRESULT AlignBoardForSpace(const WCHAR* path,DWORD space,const WCHAR* ownDisplay,BOOL graphMatches,void (*closeGraph)(void*),void* context,BOOL* switched) {
+extern "C" __declspec(dllexport) HRESULT AlignBoardForSpace(const WCHAR* path,DWORD space,const WCHAR* ownDisplay,void (*closeGraph)(void*),void* context,BOOL* switched) {
     if(switched) *switched=FALSE;
     try {
         const auto system=tbs6812::SystemRouting::Read(path).ForSpace(space);
         if(!system) return E_INVALIDARG;
-        const auto timeout=std::clamp<DWORD>(GetPrivateProfileIntW(L"TBS6812",L"BoardModeSwitchTimeoutMs",45000,path),5000,120000);
+        const auto timeout=BoardSwitchTimeout(path);
         const auto own=Lower(ownDisplay?ownDisplay:L"");
         BdaBoardDriver driver(BoardPath(own.c_str()),timeout,closeGraph,context);
         const int ownSlot=own.empty() ? -1 : driver.SlotOf(own);
         if(!own.empty() && ownSlot<0) return E_INVALIDARG;
-        const bool rewritten=tbs6812::AlignBoardModes(driver,ownSlot,tbs6812::BoardModeFor(*system),graphMatches!=FALSE);
+        const bool rewritten=tbs6812::AlignBoardModes(driver,ownSlot,tbs6812::BoardModeFor(*system));
         if(switched) *switched=rewritten;
         return S_OK;
     }
     catch(const tbs6812::BoardBusy& e) { WriteLog(std::string("board mode: ")+e.what()); return HRESULT_FROM_WIN32(ERROR_BUSY); }
     catch(const std::exception& e) { WriteLog(std::string("board mode: ")+e.what()); return E_FAIL; }
+}
+// Returns the card to BoardModeHome after this receiver closed. A busy card stays as it is.
+extern "C" __declspec(dllexport) HRESULT RestoreBoardHome(const WCHAR* path,const WCHAR* boardDisplay) {
+    try {
+        wchar_t text[16]{};
+        GetPrivateProfileStringW(L"TBS6812",L"BoardModeHome",L"",text,16,path);
+        if(!*text) return S_FALSE;
+        const auto home=tbs6812::ParseBoardHome(text);
+        if(!home) { WriteLog("board mode: BoardModeHome must be like S,S or T,S"); return E_INVALIDARG; }
+        const auto display=Lower(boardDisplay?boardDisplay:L"");
+        BdaBoardDriver driver(BoardPath(display.c_str()),BoardSwitchTimeout(path),nullptr,nullptr);
+        return tbs6812::RestoreHomeModes(driver,*home) ? S_OK : S_FALSE;
+    } catch(const std::exception& e) { WriteLog(std::string("board mode: ")+e.what()); return E_FAIL; }
 }
 extern "C" __declspec(dllexport) HRESULT CheckCapture(const WCHAR* tunerDisplay,const WCHAR* tunerFriendly,const WCHAR* captureDisplay,const WCHAR* captureFriendly,const WCHAR*) {
     const int index=Target(tunerDisplay,tunerFriendly);

@@ -259,7 +259,6 @@ const BOOL CBonTuner::_OpenTunerAnySystemType(void)
 	if (m_bOpened)
 		return TRUE;
 
-	m_bBoardAligned = FALSE;
 	std::vector<unsigned int> types{ m_nActiveSystemType };
 	for (auto it = m_DVBSystemTypeDB.SystemType.begin(); it != m_DVBSystemTypeDB.SystemType.end(); it++) {
 		if (it->first != m_nActiveSystemType)
@@ -277,10 +276,42 @@ const BOOL CBonTuner::_OpenTunerAnySystemType(void)
 	return FALSE;
 }
 
+// 閉じた後、カードが空いていれば設定されたモードへ戻す
+void CBonTuner::RestoreBoardHome(void)
+{
+	if (!m_bRebuildGraphForSystemType || m_sBoardTunerGUID.empty())
+		return;
+
+	HMODULE hModule = LoadSpecialsForBoard();
+	if (!hModule)
+		return;
+
+	HRESULT (* func)(const WCHAR *, const WCHAR *) =
+		(HRESULT (*)(const WCHAR *, const WCHAR *))::GetProcAddress(hModule, "RestoreBoardHome");
+	if (func)
+		(* func)(m_sIniFilePath.c_str(), m_sBoardTunerGUID.c_str());
+	::FreeLibrary(hModule);
+	// 次に開くまでは書込まない
+	m_sBoardTunerGUID.clear();
+}
+
+HMODULE CBonTuner::LoadSpecialsForBoard(void)
+{
+	WCHAR szPath[_MAX_PATH + 1] = L"";
+	::GetModuleFileNameW(st_hModule, szPath, _MAX_PATH + 1);
+	WCHAR szDrive[_MAX_DRIVE];
+	WCHAR szDir[_MAX_DIR];
+	WCHAR szFName[_MAX_FNAME];
+	WCHAR szExt[_MAX_EXT];
+	::_wsplitpath_s(szPath, szDrive, szDir, szFName, szExt);
+	std::wstring sDllName = common::WStringPrintf(L"%s%s%s.dll", szDrive, szDir, m_aTunerParam.sDLLBaseName.c_str());
+	return ::LoadLibraryW(sDllName.c_str());
+}
+
 DWORD CBonTuner::SpaceForSystemType(unsigned int nType)
 {
 	for (auto it = m_TuningData.Spaces.begin(); it != m_TuningData.Spaces.end(); it++) {
-		unsigned int number = m_DVBSystemTypeDB.IsExist(it->second.DVBSystemTypeNumber) ? it->second.DVBSystemTypeNumber : 0;
+		unsigned int number = m_DVBSystemTypeDB.IsDefined(it->second.DVBSystemTypeNumber) ? it->second.DVBSystemTypeNumber : 0;
 		if (number == nType)
 			return it->first;
 	}
@@ -292,27 +323,18 @@ void CBonTuner::CloseGraphForBoardMode(void * pContext)
 	((CBonTuner *)pContext)->_CloseTuner();
 }
 
-HRESULT CBonTuner::AlignBoardForSpace(const DWORD dwSpace, BOOL bGraphMatches, BOOL * pbSwitched)
+HRESULT CBonTuner::AlignBoardForSpace(const DWORD dwSpace, BOOL * pbSwitched)
 {
 	*pbSwitched = FALSE;
-	WCHAR szPath[_MAX_PATH + 1] = L"";
-	::GetModuleFileNameW(st_hModule, szPath, _MAX_PATH + 1);
-	WCHAR szDrive[_MAX_DRIVE];
-	WCHAR szDir[_MAX_DIR];
-	WCHAR szFName[_MAX_FNAME];
-	WCHAR szExt[_MAX_EXT];
-	::_wsplitpath_s(szPath, szDrive, szDir, szFName, szExt);
-	std::wstring sDllName = common::WStringPrintf(L"%s%s%s.dll", szDrive, szDir, m_aTunerParam.sDLLBaseName.c_str());
-
-	HMODULE hModule = ::LoadLibraryW(sDllName.c_str());
+	HMODULE hModule = LoadSpecialsForBoard();
 	if (!hModule)
 		return S_OK;
 
 	HRESULT hr = S_OK;
-	HRESULT (* func)(const WCHAR *, DWORD, const WCHAR *, BOOL, void (*)(void *), void *, BOOL *) =
-		(HRESULT (*)(const WCHAR *, DWORD, const WCHAR *, BOOL, void (*)(void *), void *, BOOL *))::GetProcAddress(hModule, "AlignBoardForSpace");
+	HRESULT (* func)(const WCHAR *, DWORD, const WCHAR *, void (*)(void *), void *, BOOL *) =
+		(HRESULT (*)(const WCHAR *, DWORD, const WCHAR *, void (*)(void *), void *, BOOL *))::GetProcAddress(hModule, "AlignBoardForSpace");
 	if (func)
-		hr = (* func)(m_sIniFilePath.c_str(), dwSpace, m_sOpenTunerGUID.c_str(), bGraphMatches, CBonTuner::CloseGraphForBoardMode, this, pbSwitched);
+		hr = (* func)(m_sIniFilePath.c_str(), dwSpace, m_sOpenTunerGUID.c_str(), CBonTuner::CloseGraphForBoardMode, this, pbSwitched);
 	::FreeLibrary(hModule);
 	return hr;
 }
@@ -325,9 +347,8 @@ BOOL CBonTuner::PrepareGraphForSpace(const DWORD dwSpace)
 	if (itSpace == m_TuningData.Spaces.end() || (!m_bOpened && !m_bGraphLost))
 		return TRUE;
 
-	unsigned int wanted = m_DVBSystemTypeDB.IsExist(itSpace->second.DVBSystemTypeNumber) ? itSpace->second.DVBSystemTypeNumber : 0;
-	BOOL bGraphMatches = m_bOpened && wanted == m_nActiveSystemType;
-	if (bGraphMatches && m_bBoardAligned)
+	unsigned int wanted = m_DVBSystemTypeDB.IsDefined(itSpace->second.DVBSystemTypeNumber) ? itSpace->second.DVBSystemTypeNumber : 0;
+	if (m_bOpened && wanted == m_nActiveSystemType)
 		return TRUE;
 
 	const unsigned int previous = m_nActiveSystemType;
@@ -335,12 +356,8 @@ BOOL CBonTuner::PrepareGraphForSpace(const DWORD dwSpace)
 	BOOL bSwitched = FALSE;
 	BOOL bRet = FALSE;
 	m_bKeepConsumerState = TRUE;
-	HRESULT hr = AlignBoardForSpace(dwSpace, bGraphMatches, &bSwitched);
-	if (SUCCEEDED(hr) && bGraphMatches && m_bOpened) {
-		m_bBoardAligned = TRUE;
-		bRet = TRUE;
-	}
-	else if (SUCCEEDED(hr) || !m_bOpened) {
+	HRESULT hr = AlignBoardForSpace(dwSpace, &bSwitched);
+	if (SUCCEEDED(hr) || !m_bOpened) {
 		if (m_bOpened)
 			_CloseTuner();
 		// カードが再起動した場合はデバイスを列挙し直す
@@ -350,7 +367,6 @@ BOOL CBonTuner::PrepareGraphForSpace(const DWORD dwSpace)
 			m_nActiveSystemType = wanted;
 			m_dwGraphSpace = dwSpace;
 			bRet = _OpenTuner();
-			m_bBoardAligned = bRet;
 		}
 		if (!bRet && previousSpace != CBonTuner::SPACE_INVALID) {
 			// 元の受信へ戻せるなら戻す
@@ -398,6 +414,7 @@ const BOOL CBonTuner::_OpenTuner(void)
 			break;
 
 		OutputDebug(L"Build graph Successfully.\n");
+		m_sBoardTunerGUID = m_sOpenTunerGUID;
 
 		// チューナの信号状態取得用インターフェースの取得（失敗しても続行）
 		if (m_bSignalLockedJudgeTypeSS || m_bSignalLevelGetTypeSS) {
@@ -973,6 +990,7 @@ DWORD WINAPI CBonTuner::COMProcThread(LPVOID lpParameter)
 				pCOMProc->ResetReLockChannel();
 
 				pSys->_CloseTuner();
+				pSys->RestoreBoardHome();
 				::SetEvent(pCOMProc->hEndEvent);
 				break;
 
@@ -1143,6 +1161,7 @@ DWORD WINAPI CBonTuner::COMProcThread(LPVOID lpParameter)
 
 	// グラフ関係の解放
 	pSys->_CloseTuner();
+	pSys->RestoreBoardHome();
 
 	// DSフィルター列挙とチューナ・キャプチャのリストを削除
 	SAFE_DELETE(pSys->m_pDSFilterEnumTuner);
