@@ -16,6 +16,7 @@
 #include "IBdaSpecials2.h"
 #include "Cxd2857.h"
 #include "WarmStartCache.h"
+#include "SystemRouting.h"
 
 namespace {
 const GUID accessSet = {0xfaa8f3e5,0x31d4,0x4e41,{0x88,0xef,0xd9,0xeb,0x71,0x6f,0x6e,0xc9}};
@@ -98,6 +99,8 @@ class Specials final : public IBdaSpecials2b5 {
     bool warmStart_=false;
     tbs6812::DeliverySystem system_=tbs6812::DeliverySystem::ISDBS3;
     bool validSystem_=true;
+    tbs6812::SystemRouting routing_;
+    bool requestedCable_=false, vendorSettled_=false;
     std::wstring cacheDirectory_,cachePath_;
     uint64_t deviceHash_=0;
     std::optional<tbs6812::WarmStartRecord> originalRecord_;
@@ -134,7 +137,34 @@ class Specials final : public IBdaSpecials2b5 {
         Log("warm-cache published after locked restoration; wait_ms="+std::to_string(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()));
     }
     bool Terrestrial() const { return system_==tbs6812::DeliverySystem::ISDBT || Cable(); }
-    bool Cable() const { return system_==tbs6812::DeliverySystem::J83B; }
+    bool Cable() const { return routing_.combined ? requestedCable_ : system_==tbs6812::DeliverySystem::J83B; }
+    tbs6812::DeliverySystem ChipSystem() const { return routing_.combined ? tbs6812::DeliverySystem::J83B : system_; }
+    void SelectCore() {
+        if(!Terrestrial()) return;
+        try {
+            if(Cable() && !chip_->J83BActive()) {
+                if(!vendorSettled_) {
+                    chip_->Restore();
+                    const auto start=std::chrono::steady_clock::now();
+                    auto stableSince=start;
+                    bool stable=false;
+                    while(std::chrono::steady_clock::now()-start<std::chrono::seconds(5)) {
+                        Sleep(20);
+                        const auto now=std::chrono::steady_clock::now();
+                        if(!chip_->Locked()) stableSince=now;
+                        else if(now-stableSince>=std::chrono::milliseconds(1200)) { stable=true; break; }
+                    }
+                    if(!stable) throw std::runtime_error("ISDB-T bootstrap did not settle before J.83B takeover");
+                    vendorSettled_=true;
+                }
+                chip_->BeginJ83B();
+                Log("selected J.83B core on the current tuner");
+            } else if(!Cable() && chip_->J83BActive()) {
+                chip_->EndJ83B();
+                Log("selected ISDB-T core on the current tuner");
+            }
+        } catch(...) { fatal_=true; throw; }
+    }
     uint16_t Stream(const TuningParam& p) const { return Terrestrial() ? 0 : uint16_t(p.TSID); }
     uint32_t IF(const TuningParam& p) const {
         if(!Terrestrial()) return tbs6812::Cxd2857::IntermediateFrequency(p.Frequency,p.Antenna.LowOscillator);
@@ -154,12 +184,8 @@ public:
         lockTimeout_=std::clamp<DWORD>(GetPrivateProfileIntW(L"TBS6812",L"LockTimeoutMs",3000,path),100,10000);
         inspectWarm_=GetPrivateProfileIntW(L"TBS6812",L"InspectWarmState",0,path)!=0;
         warmStart_=GetPrivateProfileIntW(L"TBS6812",L"ExperimentalWarmStart",0,path)!=0;
-        wchar_t system[32]{};
-        wchar_t legacy[32]{};
-        GetPrivateProfileStringW(L"TBS6812",L"SatelliteSystem",L"ISDB-S3",legacy,32,path);
-        GetPrivateProfileStringW(L"TBS6812",L"DeliverySystem",legacy,system,32,path);
-        validSystem_=_wcsicmp(system,L"J.83B")==0 || _wcsicmp(system,L"ISDB-T")==0 || _wcsicmp(system,L"ISDB-S")==0 || _wcsicmp(system,L"ISDB-S3")==0;
-        system_=_wcsicmp(system,L"J.83B")==0 ? tbs6812::DeliverySystem::J83B : _wcsicmp(system,L"ISDB-T")==0 ? tbs6812::DeliverySystem::ISDBT : _wcsicmp(system,L"ISDB-S")==0 ? tbs6812::DeliverySystem::ISDBS : tbs6812::DeliverySystem::ISDBS3;
+        try { routing_=tbs6812::SystemRouting::Read(path); system_=routing_.fixed; }
+        catch(const std::exception& e) { validSystem_=false; return Error("read delivery routing",e); }
         bootstrapFrequency_=GetPrivateProfileIntW(L"TBS6812",L"BootstrapFrequencyKHz",473143,path);
         if(Terrestrial() && warmStart_) {
             warmStart_=false;
@@ -174,7 +200,7 @@ public:
         std::lock_guard<std::mutex> guard(mutex_);
         try {
             if(!validSystem_) throw std::runtime_error("DeliverySystem must be ISDB-T, ISDB-S, ISDB-S3 or J.83B");
-            if(Cable() && !tbs6812::Cxd2857::ValidFrequency(bootstrapFrequency_,tbs6812::DeliverySystem::ISDBT)) throw std::runtime_error("invalid ISDB-T BootstrapFrequencyKHz");
+            if((routing_.combined || Cable()) && !tbs6812::Cxd2857::ValidFrequency(bootstrapFrequency_,tbs6812::DeliverySystem::ISDBT)) throw std::runtime_error("invalid ISDB-T BootstrapFrequencyKHz");
             if(tunerIndex_<0) throw std::runtime_error("only PCI TBS6812 Tuner 0/1 is supported");
             // Stable device-path hash keeps claims independent across slots and cards.
             uint64_t hash=14695981039346656037ULL;
@@ -186,7 +212,7 @@ public:
             property_=Properties(tuner_);
             DWORD support=0; HRESULT hr=property_->QuerySupported(accessSet,0x19,&support);
             if(FAILED(hr) || (support&(KSPROPERTY_SUPPORT_GET|KSPROPERTY_SUPPORT_SET))!=(KSPROPERTY_SUPPORT_GET|KSPROPERTY_SUPPORT_SET)) throw std::runtime_error("raw I2C property 0x19 is unavailable");
-            bus_=std::make_unique<KsBus>(property_); chip_=std::make_unique<tbs6812::Cxd2857>(*bus_,unsigned(tunerIndex_),system_);
+            bus_=std::make_unique<KsBus>(property_); chip_=std::make_unique<tbs6812::Cxd2857>(*bus_,unsigned(tunerIndex_),ChipSystem());
             BYTE modes[8]{}; DWORD returned=0;
             hr=property_->Get(accessSet,0x3c,nullptr,0,modes,sizeof(modes),&returned);
             if(FAILED(hr)) throw std::runtime_error("read tuner modes: "+HResult(hr));
@@ -238,7 +264,7 @@ public:
                             Log("warm-cache adopted: skipping vendor TuneRequest");
                         } catch(const std::exception& e) {
                             Log(std::string("warm-cache rejected: ")+e.what());
-                            chip_=std::make_unique<tbs6812::Cxd2857>(*bus_,unsigned(tunerIndex_),system_);
+                            chip_=std::make_unique<tbs6812::Cxd2857>(*bus_,unsigned(tunerIndex_),ChipSystem());
                         }
                     } else { Log("warm-cache absent/invalid: vendor bootstrap required"); }
                 }
@@ -254,6 +280,7 @@ public:
                 return E_NOINTERFACE;
             }
             const auto start=std::chrono::steady_clock::now();
+            SelectCore();
             chip_->Tune(frequency,Stream(*p));
             do {
                 if(chip_->Locked()) {
@@ -268,6 +295,12 @@ public:
     }
     const HRESULT PreLockChannel(TuningParam* p) override {
         std::lock_guard<std::mutex> guard(mutex_);
+        const auto selected=p ? routing_.ForSpace(p->IniSpaceID) : std::nullopt;
+        if(!selected) { Log("rejected: tuning space has no delivery system mapping"); return E_INVALIDARG; }
+        if(routing_.combined) {
+            if(!Supported(p) || p->Frequency<90000 || p->Frequency>770000) return E_INVALIDARG;
+            requestedCable_=*selected==tbs6812::DeliverySystem::J83B;
+        }
         if(!Cable() || fatal_ || !chip_ || chip_->Adopted()) return S_OK;
         if(!Supported(p) || p->Frequency<90000 || p->Frequency>770000) return E_INVALIDARG;
         cableRequested_=*p; substitutedParam_=p;
@@ -296,19 +329,7 @@ public:
             originalRecord_=tbs6812::WarmStartRecord{IF(bootstrap_),Stream(bootstrap_),system_};
             if(Cable()) {
                 try {
-                    // The vendor can finish delayed acquisition work after TuneRequest returns.
-                    // Keep its own terrestrial carrier locked before taking over another core.
-                    const auto settlingStart=std::chrono::steady_clock::now();
-                    auto stableSince=settlingStart;
-                    bool stable=false;
-                    while(std::chrono::steady_clock::now()-settlingStart<std::chrono::seconds(5)) {
-                        Sleep(20);
-                        const auto now=std::chrono::steady_clock::now();
-                        if(!chip_->Locked()) stableSince=now;
-                        else if(now-stableSince>=std::chrono::milliseconds(1200)) { stable=true; break; }
-                    }
-                    if(!stable) throw std::runtime_error("ISDB-T bootstrap did not settle before J.83B takeover");
-                    chip_->BeginJ83B();
+                    SelectCore();
                     chip_->Tune(IF(bootstrap_),0);
                     const auto start=std::chrono::steady_clock::now();
                     do {

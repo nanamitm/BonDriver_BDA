@@ -151,6 +151,8 @@ void Cxd2857::Tune(uint32_t frequency, uint16_t streamID) {
 }
 void Cxd2857::BeginJ83B() {
     if(!adopted_ || system_!=DeliverySystem::J83B || cableDirty_) throw std::runtime_error("J.83B requires a fresh adopted ISDB-T bootstrap");
+    Set(SLVX,0,0);
+    if(bus_.Read(SLVX,0x17,1)[0]!=6) throw std::runtime_error("J.83B takeover requires the active ISDB-T core");
     dirty_=true; cableDirty_=true; captureTransition_=true;
     try {
         // Save also the terrestrial-only wake registers needed when leaving the cable core.
@@ -229,6 +231,10 @@ void Cxd2857::RestoreTerrestrial() {
         if(std::chrono::steady_clock::now()-start>=std::chrono::seconds(3)) throw std::runtime_error("ISDB-T state restored but bootstrap carrier did not relock");
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+}
+void Cxd2857::EndJ83B() {
+    if(!adopted_ || !Terrestrial()) throw std::runtime_error("J.83B handback requires an adopted terrestrial core");
+    if(cableDirty_) RestoreTerrestrial();
 }
 void Cxd2857::Restore() {
     if(cableDirty_) { RestoreTerrestrial(); return; }

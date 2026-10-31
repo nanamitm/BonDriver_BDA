@@ -22,6 +22,8 @@ public:
     void Tune(uint32_t frequencyKHz, uint16_t streamID);
     void Restore();
     void BeginJ83B();
+    void EndJ83B();
+    bool J83BActive() const { return cableActive_; }
     bool Locked();
     float CNR();
     bool Adopted() const { return adopted_; }

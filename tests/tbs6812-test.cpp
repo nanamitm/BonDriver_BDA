@@ -217,6 +217,14 @@ int main() {
         cableChip.Restore();
         Require(cable.At(0x66,0,0x17)==6 && cable.At(0x64,0x10,0xb6)==0x12 &&
             cable.At(0x64,0,0xc3)==0,"partial J.83B transition restores ISDB-T core/IF/output");
+        for(unsigned cycle=0;cycle<3;++cycle) {
+            cableChip.Tune(497143,0);
+            Require(!cableChip.J83BActive() && cable.At(0x60,0,0x69)==0x87,"combined mode tunes terrestrial RF before cable entry");
+            cableChip.BeginJ83B(); cableChip.Tune(314250,0);
+            Require(cableChip.J83BActive() && cable.At(0x66,0,0x17)==8 && cable.At(0x60,0,0x69)==0x83,"combined mode enters cable repeatedly");
+            cableChip.EndJ83B();
+            Require(!cableChip.J83BActive() && cable.At(0x66,0,0x17)==6 && cable.At(0x60,0,0x69)==0x87,"combined mode hands back to terrestrial without close");
+        }
         const auto path=std::filesystem::temp_directory_path()/("tbs6812-cache-test-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".state");
         struct Cleanup { std::filesystem::path path; ~Cleanup(){std::error_code error;std::filesystem::remove(path,error);} } cleanup{path};
         Require(!ReadWarmRecord(path,17),"missing cache rejected");
