@@ -103,11 +103,14 @@ class Specials final : public IBdaSpecials2b5 {
     bool validSystem_=true;
     tbs6812::SystemRouting routing_;
     bool requestedCable_=false, vendorSettled_=false, terrestrialCombined_=false;
+    bool directFamily_=false;
+    std::optional<tbs6812::DeliverySystem> requestedSystem_;
     std::wstring cacheDirectory_,cachePath_;
     uint64_t deviceHash_=0;
     std::optional<tbs6812::WarmStartRecord> originalRecord_;
     DWORD lockTimeout_=3000;
     uint32_t bootstrapFrequency_=473143;
+    uint32_t satelliteBootstrapFrequency_=11727480, satelliteBootstrapTSID_=0x4010;
     TuningParam bootstrap_;
     std::optional<TuningParam> cableRequested_;
     TuningParam* substitutedParam_=nullptr;
@@ -192,9 +195,12 @@ public:
         lockTimeout_=std::clamp<DWORD>(GetPrivateProfileIntW(L"TBS6812",L"LockTimeoutMs",3000,path),100,10000);
         inspectWarm_=GetPrivateProfileIntW(L"TBS6812",L"InspectWarmState",0,path)!=0;
         warmStart_=GetPrivateProfileIntW(L"TBS6812",L"ExperimentalWarmStart",0,path)!=0;
+        directFamily_=GetPrivateProfileIntW(L"TBS6812",L"ExperimentalDirectFamily",0,path)!=0;
         try { routing_=tbs6812::SystemRouting::Read(path); system_=routing_.fixed; terrestrialCombined_=routing_.combined && !routing_.mixed; }
         catch(const std::exception& e) { validSystem_=false; return Error("read delivery routing",e); }
         bootstrapFrequency_=GetPrivateProfileIntW(L"TBS6812",L"BootstrapFrequencyKHz",473143,path);
+        satelliteBootstrapFrequency_=GetPrivateProfileIntW(L"TBS6812",L"BootstrapSatelliteRFKHz",11727480,path);
+        satelliteBootstrapTSID_=GetPrivateProfileIntW(L"TBS6812",L"BootstrapSatelliteTSID",0x4010,path);
         if(!routing_.mixed) DisableTerrestrialWarmStart();
         wchar_t directory[MAX_PATH]{};
         GetPrivateProfileStringW(L"TBS6812",L"WarmStartCacheDirectory",L"",directory,MAX_PATH,path);
@@ -223,6 +229,7 @@ public:
             if(routing_.mixed) {
                 if(modes[tunerIndex_]!=tbs6812::BoardModeTerrestrial && modes[tunerIndex_]!=tbs6812::BoardModeSatellite) throw std::runtime_error("selected tuner reports an unknown board mode");
                 terrestrialCombined_=modes[tunerIndex_]==tbs6812::BoardModeTerrestrial;
+                if(directFamily_ && modes[tunerIndex_]!=tbs6812::BoardModeSatellite) throw std::runtime_error("direct switching requires an input in satellite mode");
                 system_=terrestrialCombined_ ? tbs6812::DeliverySystem::ISDBT : graphSystem==tbs6812::DeliverySystem::ISDBS3 ? tbs6812::DeliverySystem::ISDBS3 : tbs6812::DeliverySystem::ISDBS;
                 DisableTerrestrialWarmStart();
             }
@@ -231,7 +238,7 @@ public:
             if(modes[tunerIndex_]!=(Terrestrial()?1:2)) throw std::runtime_error(
                 Terrestrial() ? "selected tuner must be in terrestrial mode (1); close all card users and use the vendor mode tool first"
                               : "selected tuner must be in satellite mode (2); close all card users and use the vendor mode tool first");
-            if(chip_->RecoverAbandonedCable()) Log("recovered: an abnormal exit left the J.83B core running; ISDB-T core restored");
+            if(chip_->RecoverAbandonedCable()) Log("recovered: an abnormal exit left another core running; the mode's core is restored");
             Log(warmStart_ ? "initialized: experimental cached warm start; vendor fallback available" : "initialized: warm ISDB takeover; vendor bootstrap required");
             if(warmStart_) {
                 if(cacheDirectory_.empty() || !std::filesystem::path(cacheDirectory_).is_absolute()) throw std::runtime_error("experimental warm start requires an absolute cache directory");
@@ -261,6 +268,14 @@ public:
     const HRESULT LockChannel(const TuningParam* p) override {
         std::lock_guard<std::mutex> guard(mutex_);
         if(fatal_ || finalized_ || !chip_) return E_FAIL;
+        if(directFamily_ && requestedSystem_ && chip_->Adopted() && *requestedSystem_!=system_) {
+            try {
+                const auto start=std::chrono::steady_clock::now();
+                chip_->SwitchSystem(*requestedSystem_);
+                system_=*requestedSystem_;
+                Log("direct switch ms="+std::to_string(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count())+" to system "+std::to_string(unsigned(system_)));
+            } catch(const std::exception& e) { fatal_=true; return Error("direct family switch",e); }
+        }
         if(!Supported(p)) { Log("rejected: unsupported channel: check delivery system, 6 MHz ISDB-T bandwidth or circular satellite settings"); return E_INVALIDARG; }
         try {
             const auto frequency=IF(*p);
@@ -309,6 +324,28 @@ public:
         std::lock_guard<std::mutex> guard(mutex_);
         const auto selected=p ? routing_.ForSpace(p->IniSpaceID) : std::nullopt;
         if(!selected) { Log("rejected: tuning space has no delivery system mapping"); return E_INVALIDARG; }
+        if(directFamily_) {
+            requestedSystem_=*selected;
+            if(fatal_ || !chip_ || chip_->Adopted()) return S_OK;
+            if(*selected==tbs6812::DeliverySystem::ISDBS || *selected==tbs6812::DeliverySystem::ISDBS3) {
+                if(system_!=*selected) { system_=*selected; chip_=std::make_unique<tbs6812::Cxd2857>(*bus_,unsigned(tunerIndex_),system_); }
+                return S_OK;
+            }
+            // The vendor driver prepares the satellite input on a satellite carrier first.
+            if(system_!=tbs6812::DeliverySystem::ISDBS) { system_=tbs6812::DeliverySystem::ISDBS; chip_=std::make_unique<tbs6812::Cxd2857>(*bus_,unsigned(tunerIndex_),system_); }
+            cableRequested_=*p; substitutedParam_=p;
+            p->Frequency=long(satelliteBootstrapFrequency_);
+            p->Polarisation=BDA_POLARISATION_CIRCULAR_R;
+            p->Antenna.HighOscillator=p->Antenna.LowOscillator=10678000;
+            p->Antenna.LNBSwitch=-1; p->Antenna.Tone=0; p->Antenna.DiSEqC=-1;
+            p->Modulation.Modulation=BDA_MOD_ISDB_S_TMCC;
+            p->Modulation.SymbolRate=28860; p->Modulation.BandWidth=-1;
+            p->Modulation.InnerFEC=BDA_FEC_VITERBI; p->Modulation.InnerFECRate=BDA_BCC_RATE_2_3;
+            p->Modulation.OuterFEC=BDA_FEC_RS_204_188; p->Modulation.OuterFECRate=BDA_BCC_RATE_NOT_SET;
+            p->ONID=-1; p->TSID=long(satelliteBootstrapTSID_); p->SID=-1;
+            Log("direct bootstrap: substitute a satellite carrier for the vendor preparation");
+            return S_OK;
+        }
         if(routing_.mixed && (terrestrialCombined_ ? tbs6812::BoardModeFor(*selected)!=tbs6812::BoardModeTerrestrial : *selected!=system_)) { Log("rejected: tuning space belongs to another delivery system's graph"); return E_INVALIDARG; }
         if(terrestrialCombined_) {
             if(!Supported(p) || p->Frequency<90000 || p->Frequency>770000) return E_INVALIDARG;
@@ -354,6 +391,25 @@ public:
                     Log("J.83B did not lock; check optical signal and channel frequency; later direct tunes remain available");
                     return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
                 } catch(...) { fatal_=true; throw; }
+            }
+            if(directFamily_ && requestedSystem_ && *requestedSystem_!=system_ && cableRequested_) {
+                // The vendor driver keeps working briefly after a lock; let it finish before leaving its core.
+                const auto settle=std::chrono::steady_clock::now();
+                auto stableSince=settle;
+                while(std::chrono::steady_clock::now()-settle<std::chrono::seconds(5) && std::chrono::steady_clock::now()-stableSince<std::chrono::milliseconds(1200)) {
+                    Sleep(20);
+                    if(!chip_->Locked()) stableSince=std::chrono::steady_clock::now();
+                }
+                chip_->SwitchSystem(*requestedSystem_);
+                system_=*requestedSystem_;
+                chip_->Tune(IF(*cableRequested_),Stream(*cableRequested_));
+                const auto start=std::chrono::steady_clock::now();
+                while(!chip_->Locked()) {
+                    if(std::chrono::steady_clock::now()-start>=std::chrono::milliseconds(lockTimeout_)) { Log("direct bootstrap: the requested channel did not lock"); return HRESULT_FROM_WIN32(WAIT_TIMEOUT); }
+                    Sleep(5);
+                }
+                Log("direct bootstrap: switched to the requested system and locked");
+                return S_OK;
             }
             Inspect("after-vendor");
             Log("bootstrap adopted: CXD2857ER already active; no chip reset or clock reinitialization");
