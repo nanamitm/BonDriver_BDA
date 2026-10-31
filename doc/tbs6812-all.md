@@ -7,11 +7,15 @@ TBS6812のチップのコアだけを切り替える。Linux版の[tbs6812_drv](
 ## 構成
 
 ```text
-BonDriver_TBS6812.dll（BonDriver_dantto4k.dllのコピー、INIにbondriverPathとpassthroughSpaces=0,1,2,3）
- └ フォルダー内のBonDriver_BDA.dll（別名）+ config/BonDriver_TBS6812_TS3.ini（同名）+ TBS6812.dll
+BonDriver_TBS6812.dll（BonDriver_dantto4k.dllのコピー）+ config/BonDriver_TBS6812.ini
+ └ tbs6812-all/BonDriver_TBS6812_Inner.dll（BonDriver_BDA.dllの別名）+ config/BonDriver_TBS6812_Inner.ini + TBS6812.dll
 ```
 
+`BonDriver_TBS6812.ini`の`smartCardReaderName`はS3の視聴に合わせて設定する。
 空間0～3（UHF、Opticast、BS、CS110）のTSはそのまま渡し、空間4（BS4K8K）だけをTLVからTSへ変換する。
+
+配置は`tools/deploy-tbs.ps1 -Destination <フォルダー> -DanttoWrapperPath <BonDriver_dantto4k.dll>`で行う。実機試験は`tools/test-all-tbs6812.ps1 -RunHardwareTests -BonDriver <DLL>`。
+衛星信号がない環境は`config/BonDriver_TBS6812_T.ini`（地上波とJ.83B、入力は地上モード）を使う。
 
 両入力を一度だけ衛星モードにする。以後は書き込まない。カードモードの書き込みはカードを再起動し、保存先も分かっていないので避ける。
 

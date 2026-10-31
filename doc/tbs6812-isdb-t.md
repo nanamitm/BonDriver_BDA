@@ -1,5 +1,7 @@
 # TBS6812 ISDB-T対応
 
+現在の設定は[tbs6812-all.md](tbs6812-all.md)と`config/BonDriver_TBS6812_T.ini`を参照。このページは制御の詳細の記録。
+
 2026-10-31、ISDB-S実装 `f3d5cba` から分岐した
 `codex/tbs6812-isdb-t` で追加。
 
@@ -91,12 +93,6 @@ TVTestでの映像音声確認や長時間録画まで検証したという意�
 両入力のモードを事前に設定したうえで、次の明示的な実機試験を実行できる。
 このスクリプト自身はモードを変更しない。試験チャンネルは地域に合わせて変更する。
 
-```powershell
-cmd /c tools\build-probe.cmd work\bon-driver-probe-isdbt.exe
-./tools/test-terrestrial-tbs6812.ps1 -RunHardwareTests -TerrestrialSlot 0 -PeerSystem T
-# 入力0=地デジ、入力1=衛星の場合
-./tools/test-terrestrial-tbs6812.ps1 -RunHardwareTests -TerrestrialSlot 0 -PeerSystem S3
-```
 
 試験用DLL/INIはwork/isdb-t-matrix、ログとストリームはwork/isdb-t-resultsに保存する。
 試験プロセスの成功に加えて、取得TS/TLVの識別情報・連続性を別途解析する必要がある。

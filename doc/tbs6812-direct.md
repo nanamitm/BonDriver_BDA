@@ -1,5 +1,7 @@
 # TBS6812.dll: warm ISDB-T / ISDB-S / ISDB-S3 / J.83B direct control
 
+Current setup: see [tbs6812-all.md](tbs6812-all.md). Deployment scripts and per-system test scripts described in older versions of this page were replaced by `tools/deploy-tbs.ps1` and `tools/test-all-tbs6812.ps1`.
+
 This extension replaces per-channel vendor BDA tuning with raw I2C through
 property 0x19. It supports **TBS6812 Tuner 0/1 with matching Capture 0/1,
 ISDB-T (6 MHz), ISDB-S, ISDB-S3 and optical J.83B (5.6 Msym/s)**, including two simultaneous receiver processes.
@@ -68,9 +70,6 @@ being reported as successful just because the vendor tune itself succeeded.
 
 ## Deploy without overwriting the baseline
 
-```powershell
-./tools/deploy-tbs.ps1 -TVTestDirectory 'C:\path\to\TVTest' -Direct
-```
 
 This deploys `BonDriver_BDA_4k.dll`, `TBS6812.dll`, the direct-control INI and
 license notices to `4k8kdrver-direct`. Only `bondriverPath` in the outer
@@ -87,9 +86,6 @@ IDs or conditional-access data.
 
 #### One shared BonDriver with automatic allocation
 
-```powershell
-./tools/deploy-tbs.ps1 -TVTestDirectory 'C:\path\to\TVTest' -Direct -AutoSelect
-```
 
 Both TVTest processes select the same `BonDriver_dantto4k.dll`. The auto template
 matches the model without specifying a slot:
@@ -131,9 +127,6 @@ listed candidates are considered, in their configured order.
 
 #### Separate explicitly assigned receivers (alternative)
 
-```powershell
-./tools/deploy-tbs.ps1 -TVTestDirectory 'C:\path\to\TVTest' -Direct -Dual
-```
 
 The original `BonDriver_dantto4k.dll` stays pinned to Tuner 0. A second outer
 `BonDriver_dantto4k_Tuner1.dll` and its INI/channel file select the matching
@@ -155,9 +148,6 @@ to both wrappers with `-DanttoWrapperPath 'C:\path\to\BonDriver_dantto4k.dll'`.
 For the raw simultaneous test, stage the inner DLL, extension and matching INI
 under `work/dual-stage/tuner0` and `tuner1`, then run:
 
-```powershell
-./tools/test-dual-tbs6812.ps1
-```
 
 The test keeps each slot streaming while the other bootstraps, switches between
 4K/8K and different stream IDs, closes and reopens. Captures and per-second byte
@@ -208,8 +198,6 @@ fixed configurations also opened successfully once free. The raw TLV/MMTP and
 converted TS captures had zero sync/continuity errors, with the requested B070,
 B0B0 and B0E0 stream IDs. The final installed shared outer DLL was also opened
 by two processes concurrently, selecting different slots and exiting normally.
-`tools/test-auto-tbs6812.ps1` runs the allocation/rejection/reuse/fixed tests
-against staged auto/fixed0/fixed1 configurations, optionally through dantto4k.
 
 The ported satellite sequence and C/N curve are GPL-2.0-or-later. See
 `BdaSpecials/TBS6812/NOTICE.md` and `COPYING` for origin and license details.
