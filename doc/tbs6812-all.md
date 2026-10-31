@@ -11,6 +11,7 @@ BonDriver_TBS6812.dll（BonDriver_dantto4k.dllのコピー）+ config/BonDriver_
  └ tbs6812-all/BonDriver_TBS6812_Inner.dll（BonDriver_BDA.dllの別名）+ config/BonDriver_TBS6812_Inner.ini + TBS6812.dll
 ```
 
+`BonDriver_dantto4k.dll`はこのパッケージに含まれない。[dantto4kのリリース](https://github.com/nanamitm/dantto4k/releases)からv20261031以降を入手する（古い版には`passthroughSpaces`がない）。
 `BonDriver_TBS6812.ini`の`smartCardReaderName`はS3の視聴に合わせて設定する。
 空間0～3（UHF、Opticast、BS、CS110）のTSはそのまま渡し、空間4（BS4K8K）だけをTLVからTSへ変換する。
 

@@ -9,7 +9,8 @@ moves between them in about a second without restarting the card.
 - Windows x64 with the TBS 6812 vendor driver installed
 - Both inputs fed with mixed terrestrial and satellite signals
 - A received BS signal: the vendor driver prepares each input on a BS carrier when it opens
-- For ISDB-S3 only: `BonDriver_dantto4k.dll` with `passthroughSpaces` support, and a card reader
+- `BonDriver_dantto4k.dll` v20261031 or later, from the [dantto4k releases](https://github.com/nanamitm/dantto4k/releases). It is not in this package, and older versions lack `passthroughSpaces`
+- For ISDB-S3: a card reader
 
 Without any satellite signal, see [Terrestrial only](#terrestrial-only).
 
@@ -26,7 +27,8 @@ Without any satellite signal, see [Terrestrial only](#terrestrial-only).
      TBS6812.dll
    ```
 
-   From a build of this repository, `tools/deploy-tbs.ps1` does this:
+   A release package holds `BonDriver_BDA.dll`, `TBS6812.dll` and `config/`. From a build of this repository,
+   `tools/deploy-tbs.ps1` does this:
 
    ```
    ./tools/deploy-tbs.ps1 -Destination <folder> -DanttoWrapperPath <BonDriver_dantto4k.dll>
