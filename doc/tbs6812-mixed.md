@@ -72,6 +72,25 @@ TVTestでのチャンネルスキャンと地上波・光・衛星の視聴も�
 
 この方式でも、dantto4kと統合版の切替と視聴をTVTestで問題なく動かせることをユーザーが確認した（2026-10-31）。
 
+## ISDB-S3も含める
+
+`config/BonDriver_TBS6812_TS3.ini`は空間4（BS4K8K）を追加したテンプレートで、`DeliverySystem="ISDB-T/J.83B/ISDB-S/ISDB-S3"`を指定する。
+S3の出力はTLVなので、このBonDriverはdantto4k経由で読み込む。dantto4kの`[bondriver]`に`passthroughSpaces=0,1,2,3`を書くと、
+空間0～3のTSを変換せず渡し、空間4だけをTS変換する。
+
+```text
+BonDriver_dantto4kのコピー（INIにbondriverPathとpassthroughSpaces）
+ └ フォルダー内のBonDriver_BDA + TS3テンプレート + TBS6812.dll
+```
+
+SとS3は同じ衛星モードなので、TuningSpaceの種類を分けてグラフを作り直すだけで切り替わり、カードは再起動しない。
+もう一方の入力が使用中でも切り替えられる。グラフの方式は、モードではなく選局先の空間から決める。
+
+実機（2026-10-31）：地上波→BS→S3→CS→S3（BS14）→J.83B→S3→地上波の8選局が全て成功し（4.3～9.7秒）、
+TSは同期・TEI・連続性エラー0、TSIDも一致した。別プロセスがBSを受信中のBS→S3→BSも成功し、相手の受信はエラー0で最大間隔124 msだった。
+
+TVTestでも`BonDriver_TBS6812.dll`（上記の構成）で問題なく視聴できることをユーザーが確認した（2026-10-31）。
+
 ## 異常終了からの復旧
 
 J.83B受信中にプロセスが強制終了すると、チップはJ.83Bコア（`SLVX 0x17`=8）のまま残る。

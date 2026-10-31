@@ -331,10 +331,10 @@ HRESULT CBonTuner::AlignBoardForSpace(const DWORD dwSpace, BOOL * pbSwitched)
 		return S_OK;
 
 	HRESULT hr = S_OK;
-	HRESULT (* func)(const WCHAR *, DWORD, const WCHAR *, void (*)(void *), void *, BOOL *) =
-		(HRESULT (*)(const WCHAR *, DWORD, const WCHAR *, void (*)(void *), void *, BOOL *))::GetProcAddress(hModule, "AlignBoardForSpace");
+	HRESULT (* func)(const WCHAR *, DWORD, DWORD, const WCHAR *, void (*)(void *), void *, BOOL *) =
+		(HRESULT (*)(const WCHAR *, DWORD, DWORD, const WCHAR *, void (*)(void *), void *, BOOL *))::GetProcAddress(hModule, "AlignBoardForSpace");
 	if (func)
-		hr = (* func)(m_sIniFilePath.c_str(), dwSpace, m_sOpenTunerGUID.c_str(), CBonTuner::CloseGraphForBoardMode, this, pbSwitched);
+		hr = (* func)(m_sIniFilePath.c_str(), dwSpace, m_dwGraphSpace, m_sOpenTunerGUID.c_str(), CBonTuner::CloseGraphForBoardMode, this, pbSwitched);
 	::FreeLibrary(hModule);
 	return hr;
 }

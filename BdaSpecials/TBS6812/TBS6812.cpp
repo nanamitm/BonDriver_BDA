@@ -21,6 +21,8 @@
 namespace {
 const GUID accessSet = {0xfaa8f3e5,0x31d4,0x4e41,{0x88,0xef,0xd9,0xeb,0x71,0x6f,0x6e,0xc9}};
 HMODULE selfModule = nullptr;
+// The system the next graph serves: CheckAndInitTunerForSpace runs just before the tuner's Specials exist.
+std::optional<tbs6812::DeliverySystem> graphSystem;
 std::mutex logMutex;
 void WriteLog(const std::string& message) {
     std::lock_guard<std::mutex> guard(logMutex);
@@ -221,7 +223,7 @@ public:
             if(routing_.mixed) {
                 if(modes[tunerIndex_]!=tbs6812::BoardModeTerrestrial && modes[tunerIndex_]!=tbs6812::BoardModeSatellite) throw std::runtime_error("selected tuner reports an unknown board mode");
                 terrestrialCombined_=modes[tunerIndex_]==tbs6812::BoardModeTerrestrial;
-                system_=terrestrialCombined_ ? tbs6812::DeliverySystem::ISDBT : tbs6812::DeliverySystem::ISDBS;
+                system_=terrestrialCombined_ ? tbs6812::DeliverySystem::ISDBT : graphSystem==tbs6812::DeliverySystem::ISDBS3 ? tbs6812::DeliverySystem::ISDBS3 : tbs6812::DeliverySystem::ISDBS;
                 DisableTerrestrialWarmStart();
             }
             if((terrestrialCombined_ || Cable()) && !tbs6812::Cxd2857::ValidFrequency(bootstrapFrequency_,tbs6812::DeliverySystem::ISDBT)) throw std::runtime_error("invalid ISDB-T BootstrapFrequencyKHz");
@@ -307,7 +309,7 @@ public:
         std::lock_guard<std::mutex> guard(mutex_);
         const auto selected=p ? routing_.ForSpace(p->IniSpaceID) : std::nullopt;
         if(!selected) { Log("rejected: tuning space has no delivery system mapping"); return E_INVALIDARG; }
-        if(routing_.mixed && tbs6812::BoardModeFor(*selected)!=tbs6812::BoardModeFor(system_)) { Log("rejected: tuning space belongs to the other board mode"); return E_INVALIDARG; }
+        if(routing_.mixed && (terrestrialCombined_ ? tbs6812::BoardModeFor(*selected)!=tbs6812::BoardModeTerrestrial : *selected!=system_)) { Log("rejected: tuning space belongs to another delivery system's graph"); return E_INVALIDARG; }
         if(terrestrialCombined_) {
             if(!Supported(p) || p->Frequency<90000 || p->Frequency>770000) return E_INVALIDARG;
             requestedCable_=*selected==tbs6812::DeliverySystem::J83B;
@@ -528,16 +530,22 @@ extern "C" __declspec(dllexport) HRESULT CheckAndInitTunerForSpace(IBaseFilter* 
         auto property=Properties(tuner);
         BYTE modes[8]{};
         if(!ReadBoardModes(property,unsigned(slot),modes)) return E_FAIL;
-        return modes[slot]==tbs6812::BoardModeFor(*system) ? S_OK : E_INVALIDARG;
+        if(modes[slot]!=tbs6812::BoardModeFor(*system)) return E_INVALIDARG;
+        graphSystem=*system;
+        return S_OK;
     } catch(const std::exception& e) { WriteLog(std::string("check tuner mode: ")+e.what()); return E_FAIL; }
 }
 // Prepares an input in a space's board mode when no other receiver holds the card.
 // HRESULT_FROM_WIN32(ERROR_BUSY) before closeGraph runs leaves the caller's graph untouched.
-extern "C" __declspec(dllexport) HRESULT AlignBoardForSpace(const WCHAR* path,DWORD space,const WCHAR* ownDisplay,void (*closeGraph)(void*),void* context,BOOL* switched) {
+extern "C" __declspec(dllexport) HRESULT AlignBoardForSpace(const WCHAR* path,DWORD space,DWORD graphSpace,const WCHAR* ownDisplay,void (*closeGraph)(void*),void* context,BOOL* switched) {
     if(switched) *switched=FALSE;
     try {
-        const auto system=tbs6812::SystemRouting::Read(path).ForSpace(space);
+        const auto routing=tbs6812::SystemRouting::Read(path);
+        const auto system=routing.ForSpace(space);
         if(!system) return E_INVALIDARG;
+        // ISDB-S and ISDB-S3 share a board mode: the own input serves both, whatever a peer does.
+        const auto current=routing.ForSpace(graphSpace);
+        if(ownDisplay && *ownDisplay && current && tbs6812::BoardModeFor(*current)==tbs6812::BoardModeFor(*system)) return S_OK;
         const auto timeout=BoardSwitchTimeout(path);
         const auto own=Lower(ownDisplay?ownDisplay:L"");
         BdaBoardDriver driver(BoardPath(own.c_str()),timeout,closeGraph,context);

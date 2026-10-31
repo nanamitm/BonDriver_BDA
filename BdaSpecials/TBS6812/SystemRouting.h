@@ -29,11 +29,12 @@ struct SystemRouting {
         wchar_t legacy[64]{},value[64]{};
         GetPrivateProfileStringW(L"TBS6812",L"SatelliteSystem",L"ISDB-S3",legacy,64,path);
         GetPrivateProfileStringW(L"TBS6812",L"DeliverySystem",legacy,value,64,path);
-        result.mixed=!_wcsicmp(value,L"ISDB-T/J.83B/ISDB-S");
+        const bool withS3=!_wcsicmp(value,L"ISDB-T/J.83B/ISDB-S/ISDB-S3");
+        result.mixed=withS3 || !_wcsicmp(value,L"ISDB-T/J.83B/ISDB-S");
         result.combined=result.mixed || !_wcsicmp(value,L"ISDB-T/J.83B");
         if(!result.combined) {
             const auto system=Parse(value);
-            if(!system) throw std::runtime_error("DeliverySystem must be ISDB-T, J.83B, ISDB-S, ISDB-S3, ISDB-T/J.83B or ISDB-T/J.83B/ISDB-S");
+            if(!system) throw std::runtime_error("DeliverySystem must be ISDB-T, J.83B, ISDB-S, ISDB-S3, ISDB-T/J.83B, ISDB-T/J.83B/ISDB-S or ISDB-T/J.83B/ISDB-S/ISDB-S3");
             result.fixed=*system;
             return result;
         }
@@ -44,8 +45,8 @@ struct SystemRouting {
             GetPrivateProfileStringW(section,L"DeliverySystem",L"",value,64,path);
             if(!*value) continue;
             const auto system=Parse(value);
-            if(!system || (*system!=DeliverySystem::ISDBT && *system!=DeliverySystem::J83B && !(result.mixed && *system==DeliverySystem::ISDBS)))
-                throw std::runtime_error(result.mixed ? "mixed tuning spaces accept only ISDB-T, J.83B or ISDB-S"
+            if(!system || (*system!=DeliverySystem::ISDBT && *system!=DeliverySystem::J83B && !(result.mixed && *system==DeliverySystem::ISDBS) && !(withS3 && *system==DeliverySystem::ISDBS3)))
+                throw std::runtime_error(result.mixed ? "this mixed DeliverySystem does not accept the tuning space's delivery system"
                                                       : "combined terrestrial tuning spaces accept only ISDB-T or J.83B");
             result.spaces.emplace(i,*system);
         }
