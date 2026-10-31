@@ -196,13 +196,6 @@ protected:
 	const BOOL _OpenTuner(void);
 	void _CloseTuner(void);
 	const BOOL _SetChannel(const DWORD dwSpace, const DWORD dwChannel);
-	const BOOL _OpenTunerAnySystemType(void);
-	DWORD SpaceForSystemType(unsigned int nType);
-	BOOL PrepareGraphForSpace(const DWORD dwSpace);
-	HRESULT AlignBoardForSpace(const DWORD dwSpace, BOOL * pbSwitched);
-	void RestoreBoardHome(void);
-	HMODULE LoadSpecialsForBoard(void);
-	static void CloseGraphForBoardMode(void * pContext);
 	const float _GetSignalLevel(void);
 	const BOOL _IsTunerOpening(void);
 	const DWORD _GetCurSpace(void);
@@ -1032,11 +1025,6 @@ protected:
 				return FALSE;
 			return TRUE;
 		}
-		// グラフが無くITuningSpaceを解放済みでも、iniファイルの定義があればTRUE
-		BOOL IsDefined(unsigned int number)
-		{
-			return SystemType.find(number) != SystemType.end();
-		}
 		void ReleaseAll(void)
 		{
 			for (auto it = SystemType.begin(); it != SystemType.end(); it++) {
@@ -1045,15 +1033,6 @@ protected:
 		}
 	};
 	DVBSystemTypeDB m_DVBSystemTypeDB;
-
-	// TuningSpaceの種類が変わる選局時にグラフを作り直す
-	BOOL m_bRebuildGraphForSystemType = FALSE;
-	unsigned int m_nActiveSystemType = 0;		// 現在のグラフが扱うTuningSpaceの種類番号
-	DWORD m_dwGraphSpace = 0xFFFFFFFFUL;		// 現在のグラフの入力選択に使う空間番号
-	BOOL m_bKeepConsumerState = FALSE;			// グラフ再構築中はTS読出し側の状態を残す
-	BOOL m_bGraphLost = FALSE;					// 再構築に失敗してグラフが無い
-	std::wstring m_sOpenTunerGUID;				// 使用中のチューナのDisplayName
-	std::wstring m_sBoardTunerGUID;				// 最後に開いたチューナのDisplayName（閉じた後のモード復帰用）
 
 	// iniファイルで定義できる最大TuningSpaceの種類データ数
 	static constexpr unsigned int MAX_DVB_SYSTEM_TYPE = 10U;

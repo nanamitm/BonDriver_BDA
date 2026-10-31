@@ -9,4 +9,4 @@ TBS6812直接制御の追加実装：
 - [ISDB-T設定・受信モードと検証結果](doc/tbs6812-isdb-t.md)
 - [J.83 Annex B（スカパー光）設定・検証結果](doc/tbs6812-j83b.md)
 - [同じBonDriverで地デジとスカパー光を切り替える](doc/tbs6812-terrestrial-combined.md)
-- [同じBonDriverで地デジ・光・ISDB-Sを切り替える](doc/tbs6812-mixed.md)
+- [1つのBonDriverで全方式を切り替える](doc/tbs6812-all.md)

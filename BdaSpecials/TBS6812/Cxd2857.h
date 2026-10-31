@@ -23,6 +23,9 @@ public:
     void Restore();
     void BeginJ83B();
     void EndJ83B();
+    bool RecoverAbandonedCable();
+    // Experimental: moves an adopted demodulator between delivery systems without the vendor driver.
+    void SwitchSystem(DeliverySystem system);
     bool J83BActive() const { return cableActive_; }
     bool Locked();
     float CNR();
@@ -37,6 +40,10 @@ private:
     I2cBus& bus_;
     uint8_t tunerAddress_;
     DeliverySystem system_;
+    DeliverySystem adoptedSystem_=DeliverySystem::ISDBS3;
+    void SleepActiveCore();
+    void WakeSatellite();
+    void LeaveCable();
     bool S3() const { return system_ == DeliverySystem::ISDBS3; }
     void Output(uint8_t value);
     bool Valid(uint32_t frequency, uint16_t streamID) const;

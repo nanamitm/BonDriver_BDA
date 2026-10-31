@@ -1,5 +1,6 @@
-// Copyright (c) Sony; TurboSight; 2026 Till0196
-// C++ adaptation of coax CXD2857ER satellite/terrestrial tuning and monitors.
+// Copyright (c) Sony; TurboSight; 2026 Till0196; 2024 otya; 2021 Davin zhang
+// C++ adaptation of coax CXD2857ER satellite/terrestrial tuning and monitors,
+// and of the tbs6812_drv core sleep and wake sequences.
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "Cxd2857.h"
 #include "CnrTable.h"
@@ -85,7 +86,7 @@ void Cxd2857::Adopt(uint32_t frequency, uint16_t expectedStreamID) {
         Bank(S3() ? 0xd0 : 0xc0); originalStream_ = bus_.Read(SLVT, S3() ? 0x87 : 0xe9, S3() ? 2 : 3);
         if ((uint16_t(originalStream_[0]) << 8 | originalStream_[1]) != expectedStreamID || (!S3() && (originalStream_[2] & 1) != (expectedStreamID < 8 ? 1 : 0))) throw std::runtime_error("vendor preparation selected a different stream ID or selection mode");
     }
-    originalFrequency_ = frequency; adopted_ = true;
+    originalFrequency_ = frequency; adopted_ = true; adoptedSystem_ = system_;
 }
 void Cxd2857::TuneTerrestrialRF(uint32_t frequency) {
     // CXD2868ER/Freia ISDB-T 6 MHz, 24 MHz reference. No REFOUT/GPIO writes.
@@ -212,7 +213,7 @@ void Cxd2857::WakeTerrestrial() {
     Bank(0x12); Set(SLVT,0x71,7); Bank(0x15); Set(SLVT,0xbe,2);
     Bank(0); Mask(SLVT,0x80,8,0x1f);
 }
-void Cxd2857::RestoreTerrestrial() {
+void Cxd2857::LeaveCable() {
     captureTransition_=false;
     Output(1); Bank(0); Set(SLVT,0x81,0xff);
     WakeTerrestrial();
@@ -223,6 +224,9 @@ void Cxd2857::RestoreTerrestrial() {
         Set(r.address,0,r.bank); Set(r.address,r.reg,r.value);
     }
     cableActive_=false;
+}
+void Cxd2857::RestoreTerrestrial() {
+    LeaveCable();
     Acquire({},originalFrequency_);
     Bank(0); Set(SLVT,0x81,originalPins_); Output(originalOutput_); Bank(0);
     cableDirty_=false; dirty_=false; transitionRegisters_.clear();
@@ -236,7 +240,111 @@ void Cxd2857::EndJ83B() {
     if(!adopted_ || !Terrestrial()) throw std::runtime_error("J.83B handback requires an adopted terrestrial core");
     if(cableDirty_) RestoreTerrestrial();
 }
+// A killed process leaves another core running, and the vendor driver only initializes
+// its demodulator when the board mode is written, so its next tune never locks.
+bool Cxd2857::RecoverAbandonedCable() {
+    if(adopted_) return false;
+    Set(SLVX,0,0);
+    const auto core=bus_.Read(SLVX,0x17,1)[0];
+    const auto wanted=system_;
+    const bool foreign=Terrestrial() ? core==8 || core==0x0c || core==0x0d : core==6 || core==8;
+    if(!foreign) return false;
+    if(core==0x0c || core==0x0d) { system_=core==0x0d ? DeliverySystem::ISDBS3 : DeliverySystem::ISDBS; SleepActiveCore(); }
+    else if(core==6) { system_=DeliverySystem::ISDBT; SleepActiveCore(); }
+    else {
+        system_=DeliverySystem::ISDBT;
+        Output(1); Bank(0); Set(SLVT,0x81,0xff);
+        WakeTerrestrial();
+        if(wanted!=DeliverySystem::ISDBT && wanted!=DeliverySystem::J83B) SleepActiveCore();
+    }
+    system_=wanted;
+    if(Terrestrial()) { if(core!=8) WakeTerrestrial(); }
+    else WakeSatellite();
+    Bank(0); Set(SLVT,0x81,0);
+    Output(0);
+    Bank(0);
+    return true;
+}
+void Cxd2857::SleepActiveCore() {
+    Output(1); Bank(0); Mask(SLVT,0x80,0x1f,0x1f); Set(SLVT,0x81,0xff);
+    if(Terrestrial()) {
+        Bank(0x10);
+        for(const auto& p : std::vector<Bytes>{{0x69,5},{0x6b,7},{0x9d,0x14},{0xd3,0},{0xed,1},{0xe2,0x4e},{0xf2,3},{0xde,0x32}}) Set(SLVT,p[0],p[1]);
+        Bank(0x15); Set(SLVT,0xde,3); Bank(0x17); Put(SLVT,0x38,{1,2});
+        Bank(0x1e); Set(SLVT,0x73,0); Bank(0x63); Set(SLVT,0x81,1);
+        Set(SLVX,0,0); Set(SLVX,0x18,1);
+        Bank(0); Set(SLVT,0x49,0x33); Set(SLVT,0x4b,0x21); Set(SLVT,0xfe,1);
+        Set(SLVT,0x2c,0); Set(SLVT,0xa9,0); Set(SLVX,0x17,1);
+        return;
+    }
+    if(S3()) { Bank(0xa3); Put(SLVT,0x43,{0x0a,0x0a}); }
+    Set(SLVX,0,0); Set(SLVX,0x18,1);
+    Bank(0); Set(SLVT,0x6a,0x11); Set(SLVT,0x4b,0x21); Set(SLVX,0x28,0x13);
+    Set(SLVT,0xfe,1); Set(SLVT,0x2c,0); Set(SLVT,0xa9,0); Set(SLVT,0x2d,0); Set(SLVX,0x17,1);
+    Bank(0xa0); Set(SLVT,0xd7,0xa0); Bank(0);
+}
+void Cxd2857::WakeSatellite() {
+    if(S3()) {
+        // SLtoAIS3 with the parallel TLV interface clock.
+        Bank(1); Mask(SLVT,0xc1,0,0x80); Mask(SLVT,0xcf,0,1); Mask(SLVT,0xe7,1,1);
+        Bank(0x56); Mask(SLVT,0x83,4,7);
+        Bank(0); Mask(SLVT,0x32,0,1); Mask(SLVT,0x33,2,3); Mask(SLVT,0x32,1,1);
+        Set(SLVX,0,0); Set(SLVX,0x17,0x0d);
+        Bank(0); Set(SLVT,0x2d,0); Set(SLVT,0xa9,1); Set(SLVT,0x2c,1);
+        Set(SLVX,0x28,0x31); Set(SLVT,0x4b,0x31); Set(SLVT,0x6a,0); Set(SLVX,0x18,0);
+        Bank(0); Set(SLVT,0x20,1);
+        Bank(0xa3); Put(SLVT,0x43,{0x0b,0x0b});
+        Bank(0xae); Put(SLVT,0x46,{0x04,0x91});
+        Bank(0xb6); Set(SLVT,0x74,0x59);
+        Bank(0xd5); Put(SLVT,0x61,{0x48,0xfe,0x4e,0x6e,0xfe}); Put(SLVT,0x67,{0x4e,0x6e}); Put(SLVT,0x90,{0x10,0x03,0x10});
+        Bank(0xd6); Put(SLVT,0x18,{0x33,0xeb}); Set(SLVT,0x1c,0x59); Set(SLVT,0x1e,0x6e); Put(SLVT,0x21,{0x4e,0x80,0x80,0x10}); Put(SLVT,0x51,{0xb3,0xb3,0xc3});
+        Bank(0xda); Set(SLVT,0xbc,2); Put(SLVT,0xd6,{0x60,0x70});
+        Bank(0xae); Put(SLVT,0x20,{0x08,0x70,0x64});
+        Bank(0xda); Set(SLVT,0xcb,1); Set(SLVT,0xc1,1);
+        Bank(0xa0); Set(SLVT,0xd7,0);
+        Bank(0); Mask(SLVT,0x80,0x10,0x1f);
+        return;
+    }
+    // SLtoAIS with the parallel TS interface clock the vendor driver selected.
+    Bank(0); Mask(SLVT,0xd3,1,1); Mask(SLVT,0xde,0,1); Mask(SLVT,0xda,0,1);
+    Set(SLVT,0xd9,8); Mask(SLVT,0x32,0,1); Mask(SLVT,0x33,1,3); Mask(SLVT,0x32,1,1);
+    Bank(0x10); Mask(SLVT,0x66,1,1); Bank(0x40); Mask(SLVT,0x66,1,1);
+    Set(SLVX,0,0); Set(SLVX,0x17,0x0c);
+    Bank(0); Set(SLVT,0x2d,0); Set(SLVT,0xa9,0); Set(SLVT,0x2c,1);
+    Set(SLVX,0x28,0x31); Set(SLVT,0x4b,0x31); Set(SLVT,0x6a,0); Set(SLVX,0x18,0);
+    Bank(0); Set(SLVT,0x20,1); Put(SLVT,0xce,{0,0});
+    Bank(0xae); Put(SLVT,0x20,{7,0x37,0x0a});
+    Bank(0xa0); Set(SLVT,0xd7,0);
+    Bank(0); Mask(SLVT,0x80,0x10,0x1f);
+}
+void Cxd2857::SwitchSystem(DeliverySystem system) {
+    if(system==system_) return;
+    if(!adopted_) throw std::runtime_error("direct switching requires an adopted demodulator");
+    dirty_=true;
+    if(cableActive_) {
+        LeaveCable();
+        cableDirty_=false; transitionRegisters_.clear();
+        system_=DeliverySystem::ISDBT;
+    }
+    if(system==DeliverySystem::J83B || system==DeliverySystem::ISDBT) {
+        if(system_!=DeliverySystem::ISDBT) {
+            SleepActiveCore();
+            system_=DeliverySystem::ISDBT;
+            WakeTerrestrial();
+        }
+        Bank(0); Set(SLVT,0x81,0);
+        if(system==DeliverySystem::J83B) { system_=system; BeginJ83B(); }
+        return;
+    }
+    if(system_!=system) {
+        SleepActiveCore();
+        system_=system;
+        WakeSatellite();
+    }
+    Bank(0); Set(SLVT,0x81,0);
+}
 void Cxd2857::Restore() {
+    if(adopted_ && system_!=adoptedSystem_) SwitchSystem(adoptedSystem_);
     if(cableDirty_) { RestoreTerrestrial(); return; }
     if (!adopted_ || !dirty_) return;
     Acquire(originalStream_, originalFrequency_);
