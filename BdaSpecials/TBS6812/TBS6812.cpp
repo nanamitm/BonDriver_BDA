@@ -16,6 +16,7 @@
 #include "IBdaSpecials2.h"
 #include "Cxd2857.h"
 #include "WarmStartCache.h"
+#include "SystemRouting.h"
 
 namespace {
 const GUID accessSet = {0xfaa8f3e5,0x31d4,0x4e41,{0x88,0xef,0xd9,0xeb,0x71,0x6f,0x6e,0xc9}};
@@ -96,11 +97,18 @@ class Specials final : public IBdaSpecials2b5 {
     bool fatal_=false, bootstrapPending_=false, finalized_=false;
     bool inspectWarm_=false;
     bool warmStart_=false;
+    tbs6812::DeliverySystem system_=tbs6812::DeliverySystem::ISDBS3;
+    bool validSystem_=true;
+    tbs6812::SystemRouting routing_;
+    bool requestedCable_=false, vendorSettled_=false, terrestrialCombined_=false;
     std::wstring cacheDirectory_,cachePath_;
     uint64_t deviceHash_=0;
     std::optional<tbs6812::WarmStartRecord> originalRecord_;
     DWORD lockTimeout_=3000;
+    uint32_t bootstrapFrequency_=473143;
     TuningParam bootstrap_;
+    std::optional<TuningParam> cableRequested_;
+    TuningParam* substitutedParam_=nullptr;
     HANDLE claim_=nullptr;
     void Log(const std::string& message) const { WriteLog("tuner="+std::to_string(tunerIndex_)+" "+message); }
     void Inspect(const char* stage) {
@@ -128,11 +136,53 @@ class Specials final : public IBdaSpecials2b5 {
             throw std::runtime_error("cannot publish the experimental warm-start record");
         Log("warm-cache published after locked restoration; wait_ms="+std::to_string(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()));
     }
-    static uint32_t IF(const TuningParam& p) { return tbs6812::Cxd2857::IntermediateFrequency(p.Frequency,p.Antenna.LowOscillator); }
+    bool Terrestrial() const { return system_==tbs6812::DeliverySystem::ISDBT || Cable(); }
+    bool Cable() const { return terrestrialCombined_ ? requestedCable_ : system_==tbs6812::DeliverySystem::J83B; }
+    tbs6812::DeliverySystem ChipSystem() const { return terrestrialCombined_ ? tbs6812::DeliverySystem::J83B : system_; }
+    void SelectCore() {
+        if(!Terrestrial()) return;
+        try {
+            if(Cable() && !chip_->J83BActive()) {
+                if(!vendorSettled_) {
+                    chip_->Restore();
+                    const auto start=std::chrono::steady_clock::now();
+                    auto stableSince=start;
+                    bool stable=false;
+                    while(std::chrono::steady_clock::now()-start<std::chrono::seconds(5)) {
+                        Sleep(20);
+                        const auto now=std::chrono::steady_clock::now();
+                        if(!chip_->Locked()) stableSince=now;
+                        else if(now-stableSince>=std::chrono::milliseconds(1200)) { stable=true; break; }
+                    }
+                    if(!stable) throw std::runtime_error("ISDB-T bootstrap did not settle before J.83B takeover");
+                    vendorSettled_=true;
+                }
+                chip_->BeginJ83B();
+                Log("selected J.83B core on the current tuner");
+            } else if(!Cable() && chip_->J83BActive()) {
+                chip_->EndJ83B();
+                Log("selected ISDB-T core on the current tuner");
+            }
+        } catch(...) { fatal_=true; throw; }
+    }
+    uint16_t Stream(const TuningParam& p) const { return Terrestrial() ? 0 : uint16_t(p.TSID); }
+    uint32_t IF(const TuningParam& p) const {
+        if(!Terrestrial()) return tbs6812::Cxd2857::IntermediateFrequency(p.Frequency,p.Antenna.LowOscillator);
+        if(p.Frequency<90000 || p.Frequency>770000) throw std::runtime_error("terrestrial-side RF must be 90..770 MHz");
+        return uint32_t(p.Frequency);
+    }
     bool Supported(const TuningParam* p) {
-        return p && tbs6812::Cxd2857::IsS3(p->TSID) && (p->Polarisation==BDA_POLARISATION_CIRCULAR_R || p->Polarisation==BDA_POLARISATION_CIRCULAR_L) && p->Antenna.Tone==0 && p->Antenna.DiSEqC<=0;
+        if(Terrestrial()) return p && p->Modulation.BandWidth==6 &&
+            p->Polarisation<=BDA_POLARISATION_NOT_DEFINED && p->Antenna.DiSEqC<=0;
+        return p && tbs6812::Cxd2857::SupportsID(p->TSID,system_) && (p->Polarisation==BDA_POLARISATION_CIRCULAR_R || p->Polarisation==BDA_POLARISATION_CIRCULAR_L) && p->Antenna.Tone==0 && p->Antenna.DiSEqC<=0;
     }
     const HRESULT Error(const char* stage,const std::exception& e) { Log(std::string(stage)+": "+e.what()); return E_FAIL; }
+    void DisableTerrestrialWarmStart() {
+        if(Terrestrial() && warmStart_) {
+            warmStart_=false;
+            Log("Terrestrial-side cached takeover is not enabled; vendor preparation is required on each open");
+        }
+    }
 public:
     Specials(IBaseFilter* tuner,int index,const wchar_t* display):tuner_(tuner),tunerIndex_(index),identity_(Lower(display?display:L"")) {}
     ~Specials() { if(claim_) CloseHandle(claim_); }
@@ -140,6 +190,10 @@ public:
         lockTimeout_=std::clamp<DWORD>(GetPrivateProfileIntW(L"TBS6812",L"LockTimeoutMs",3000,path),100,10000);
         inspectWarm_=GetPrivateProfileIntW(L"TBS6812",L"InspectWarmState",0,path)!=0;
         warmStart_=GetPrivateProfileIntW(L"TBS6812",L"ExperimentalWarmStart",0,path)!=0;
+        try { routing_=tbs6812::SystemRouting::Read(path); system_=routing_.fixed; terrestrialCombined_=routing_.combined && !routing_.mixed; }
+        catch(const std::exception& e) { validSystem_=false; return Error("read delivery routing",e); }
+        bootstrapFrequency_=GetPrivateProfileIntW(L"TBS6812",L"BootstrapFrequencyKHz",473143,path);
+        if(!routing_.mixed) DisableTerrestrialWarmStart();
         wchar_t directory[MAX_PATH]{};
         GetPrivateProfileStringW(L"TBS6812",L"WarmStartCacheDirectory",L"",directory,MAX_PATH,path);
         cacheDirectory_=directory;
@@ -148,6 +202,7 @@ public:
     const HRESULT InitializeHook() override {
         std::lock_guard<std::mutex> guard(mutex_);
         try {
+            if(!validSystem_) throw std::runtime_error("DeliverySystem must be ISDB-T, ISDB-S, ISDB-S3 or J.83B");
             if(tunerIndex_<0) throw std::runtime_error("only PCI TBS6812 Tuner 0/1 is supported");
             // Stable device-path hash keeps claims independent across slots and cards.
             uint64_t hash=14695981039346656037ULL;
@@ -159,13 +214,22 @@ public:
             property_=Properties(tuner_);
             DWORD support=0; HRESULT hr=property_->QuerySupported(accessSet,0x19,&support);
             if(FAILED(hr) || (support&(KSPROPERTY_SUPPORT_GET|KSPROPERTY_SUPPORT_SET))!=(KSPROPERTY_SUPPORT_GET|KSPROPERTY_SUPPORT_SET)) throw std::runtime_error("raw I2C property 0x19 is unavailable");
-            bus_=std::make_unique<KsBus>(property_); chip_=std::make_unique<tbs6812::Cxd2857>(*bus_,unsigned(tunerIndex_));
             BYTE modes[8]{}; DWORD returned=0;
             hr=property_->Get(accessSet,0x3c,nullptr,0,modes,sizeof(modes),&returned);
             if(FAILED(hr)) throw std::runtime_error("read tuner modes: "+HResult(hr));
             if(returned<=DWORD(tunerIndex_)) throw std::runtime_error("tuner mode property returned a truncated slot array");
-            if(modes[tunerIndex_]!=2) throw std::runtime_error("selected tuner must already be in satellite mode; no card-wide mode changes are performed");
-            Log(warmStart_ ? "initialized: experimental cached warm start; vendor fallback available" : "initialized: warm ISDB-S3 takeover; vendor bootstrap required");
+            if(routing_.mixed) {
+                if(modes[tunerIndex_]!=tbs6812::BoardModeTerrestrial && modes[tunerIndex_]!=tbs6812::BoardModeSatellite) throw std::runtime_error("selected tuner reports an unknown board mode");
+                terrestrialCombined_=modes[tunerIndex_]==tbs6812::BoardModeTerrestrial;
+                system_=terrestrialCombined_ ? tbs6812::DeliverySystem::ISDBT : tbs6812::DeliverySystem::ISDBS;
+                DisableTerrestrialWarmStart();
+            }
+            if((terrestrialCombined_ || Cable()) && !tbs6812::Cxd2857::ValidFrequency(bootstrapFrequency_,tbs6812::DeliverySystem::ISDBT)) throw std::runtime_error("invalid ISDB-T BootstrapFrequencyKHz");
+            bus_=std::make_unique<KsBus>(property_); chip_=std::make_unique<tbs6812::Cxd2857>(*bus_,unsigned(tunerIndex_),ChipSystem());
+            if(modes[tunerIndex_]!=(Terrestrial()?1:2)) throw std::runtime_error(
+                Terrestrial() ? "selected tuner must be in terrestrial mode (1); close all card users and use the vendor mode tool first"
+                              : "selected tuner must be in satellite mode (2); close all card users and use the vendor mode tool first");
+            Log(warmStart_ ? "initialized: experimental cached warm start; vendor fallback available" : "initialized: warm ISDB takeover; vendor bootstrap required");
             if(warmStart_) {
                 if(cacheDirectory_.empty() || !std::filesystem::path(cacheDirectory_).is_absolute()) throw std::runtime_error("experimental warm start requires an absolute cache directory");
                 std::filesystem::create_directories(cacheDirectory_);
@@ -176,6 +240,7 @@ public:
         } catch(const std::exception& e) { fatal_=true; return Error("initialize",e); }
     }
     const HRESULT SetLNBPower(bool active) override {
+        if(Terrestrial()) return S_OK; // Never change shared LNB supply for terrestrial reception.
         if(!property_) return E_FAIL;
         // Only adapter 0 owns the board's LNB supply. Slot 1 must not change it.
         if(tunerIndex_==1) return S_OK;
@@ -186,18 +251,20 @@ public:
     const HRESULT Set22KHz(bool active) override { return active?E_INVALIDARG:S_OK; }
     const HRESULT Set22KHz(long tone) override { return tone==0?S_OK:E_INVALIDARG; }
     const HRESULT SetTSid(long id) override {
-        if(!property_ || !tbs6812::Cxd2857::IsS3(id)) return E_INVALIDARG;
+        if(Terrestrial()) return S_OK; // TSID does not select terrestrial RF.
+        if(!property_ || !tbs6812::Cxd2857::SupportsID(id,system_)) return E_INVALIDARG;
         return property_->Set(accessSet,0x60,&id,sizeof(id),&id,sizeof(id));
     }
     const HRESULT LockChannel(const TuningParam* p) override {
         std::lock_guard<std::mutex> guard(mutex_);
         if(fatal_ || finalized_ || !chip_) return E_FAIL;
-        if(!Supported(p)) { Log("rejected: this extension accepts circular ISDB-S3 channels with tone off only"); return E_INVALIDARG; }
+        if(!Supported(p)) { Log("rejected: unsupported channel: check delivery system, 6 MHz ISDB-T bandwidth or circular satellite settings"); return E_INVALIDARG; }
         try {
             const auto frequency=IF(*p);
+            if(system_==tbs6812::DeliverySystem::ISDBS && frequency>2150000) throw std::runtime_error("ISDB-S IF must be 950..2150 MHz");
             if(!chip_->Adopted()) {
                 if(!cachePath_.empty()) {
-                    const auto cached=tbs6812::ReadWarmRecord(cachePath_,deviceHash_);
+                    const auto cached=tbs6812::ReadWarmRecord(cachePath_,deviceHash_,system_);
                     ConsumeCache(); // A crash from this point cannot reuse stale state.
                     if(cached) {
                         try {
@@ -206,19 +273,24 @@ public:
                             Log("warm-cache adopted: skipping vendor TuneRequest");
                         } catch(const std::exception& e) {
                             Log(std::string("warm-cache rejected: ")+e.what());
-                            chip_=std::make_unique<tbs6812::Cxd2857>(*bus_,unsigned(tunerIndex_));
+                            chip_=std::make_unique<tbs6812::Cxd2857>(*bus_,unsigned(tunerIndex_),ChipSystem());
                         }
                     } else { Log("warm-cache absent/invalid: vendor bootstrap required"); }
                 }
             }
             if(!chip_->Adopted()) {
-                bootstrap_=*p; bootstrapPending_=true;
+                if(system_==tbs6812::DeliverySystem::ISDBS && p->TSID<8) {
+                    Log("bootstrap requires an absolute TSID; relative TS indices are supported after adoption only");
+                    return E_INVALIDARG;
+                }
+                bootstrap_=Cable() && cableRequested_ ? *cableRequested_ : *p; bootstrapPending_=true;
                 const HRESULT hr=SetLNBPower(true); if(FAILED(hr)) throw std::runtime_error("LNB preparation failed: "+HResult(hr));
                 Log("bootstrap: returning E_NOINTERFACE for the initial vendor tune only");
                 return E_NOINTERFACE;
             }
             const auto start=std::chrono::steady_clock::now();
-            chip_->Tune(frequency,uint16_t(p->TSID));
+            SelectCore();
+            chip_->Tune(frequency,Stream(*p));
             do {
                 if(chip_->Locked()) {
                     std::ostringstream s; s<<"direct tune IF_kHz="<<frequency<<" stream_id=0x"<<std::hex<<p->TSID<<std::dec<<" lock_ms="<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count(); Log(s.str());
@@ -226,18 +298,60 @@ public:
                 }
                 Sleep(5);
             } while(std::chrono::steady_clock::now()-start<std::chrono::milliseconds(lockTimeout_));
-            Log("direct tune timed out: no ISDB-S3 lock; vendor tune was not resubmitted");
+            Log("direct tune timed out: no configured ISDB lock; vendor tune was not resubmitted");
             return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
         } catch(const std::exception& e) { return Error("direct tune",e); }
     }
+    const HRESULT PreLockChannel(TuningParam* p) override {
+        std::lock_guard<std::mutex> guard(mutex_);
+        const auto selected=p ? routing_.ForSpace(p->IniSpaceID) : std::nullopt;
+        if(!selected) { Log("rejected: tuning space has no delivery system mapping"); return E_INVALIDARG; }
+        if(routing_.mixed && tbs6812::BoardModeFor(*selected)!=tbs6812::BoardModeFor(system_)) { Log("rejected: tuning space belongs to the other board mode"); return E_INVALIDARG; }
+        if(terrestrialCombined_) {
+            if(!Supported(p) || p->Frequency<90000 || p->Frequency>770000) return E_INVALIDARG;
+            requestedCable_=*selected==tbs6812::DeliverySystem::J83B;
+        }
+        if(!Cable() || fatal_ || !chip_ || chip_->Adopted()) return S_OK;
+        if(!Supported(p) || p->Frequency<90000 || p->Frequency>770000) return E_INVALIDARG;
+        cableRequested_=*p; substitutedParam_=p;
+        p->Frequency=long(bootstrapFrequency_);
+        p->Modulation.Modulation=BDA_MOD_ISDB_T_TMCC;
+        p->Modulation.SymbolRate=-1; p->Modulation.BandWidth=6;
+        p->Modulation.InnerFEC=BDA_FEC_VITERBI; p->Modulation.InnerFECRate=BDA_BCC_RATE_3_4;
+        p->Modulation.OuterFEC=BDA_FEC_RS_204_188; p->Modulation.OuterFECRate=BDA_BCC_RATE_NOT_SET;
+        p->ONID=-1; p->TSID=-1; p->SID=-1;
+        Log("J.83B bootstrap: substitute complete ISDB-T tuning parameters at RF_kHz="+std::to_string(bootstrapFrequency_));
+        return S_OK;
+    }
     const HRESULT PostLockChannel(const TuningParam*) override {
         std::lock_guard<std::mutex> guard(mutex_);
+        if(substitutedParam_ && cableRequested_) { *substitutedParam_=*cableRequested_; substitutedParam_=nullptr; }
         if(!bootstrapPending_ || !chip_ || fatal_) return S_OK;
         bootstrapPending_=false;
         try {
-            if(!chip_->Locked()) throw std::runtime_error("initial vendor tune did not lock; close/reopen before retrying");
-            chip_->Adopt(IF(bootstrap_),uint16_t(bootstrap_.TSID));
-            originalRecord_=tbs6812::WarmStartRecord{IF(bootstrap_),uint16_t(bootstrap_.TSID)};
+            bool locked=chip_->Locked();
+            // A card that just restarted can lock shortly after the vendor tune returns.
+            for(const auto start=std::chrono::steady_clock::now();!locked && routing_.mixed && Terrestrial() && std::chrono::steady_clock::now()-start<std::chrono::seconds(2);locked=chip_->Locked()) Sleep(20);
+            if(!locked) {
+                if(!Terrestrial()) throw std::runtime_error("initial vendor tune did not lock; close/reopen before retrying");
+                Log("ISDB-T vendor bootstrap did not lock: no takeover; next channel will retry vendor preparation");
+                return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+            }
+            chip_->Adopt(Cable()?bootstrapFrequency_:IF(bootstrap_),Stream(bootstrap_));
+            originalRecord_=tbs6812::WarmStartRecord{IF(bootstrap_),Stream(bootstrap_),system_};
+            if(Cable()) {
+                try {
+                    SelectCore();
+                    chip_->Tune(IF(bootstrap_),0);
+                    const auto start=std::chrono::steady_clock::now();
+                    do {
+                        if(chip_->Locked()) { Log("J.83B 5.6 Msym/s locked after ISDB-T preparation"); return S_OK; }
+                        Sleep(5);
+                    } while(std::chrono::steady_clock::now()-start<std::chrono::milliseconds(lockTimeout_));
+                    Log("J.83B did not lock; check optical signal and channel frequency; later direct tunes remain available");
+                    return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+                } catch(...) { fatal_=true; throw; }
+            }
             Inspect("after-vendor");
             Log("bootstrap adopted: CXD2857ER already active; no chip reset or clock reinitialization");
             return S_OK;
@@ -257,6 +371,7 @@ public:
         std::lock_guard<std::mutex> guard(mutex_);
         if(!value) return E_POINTER;
         *value=0; if(!chip_ || !chip_->Adopted()) return E_NOINTERFACE;
+        if(Cable()) Inspect("J83B-signal-check");
         try { if(chip_->Locked()) *value=chip_->CNR(); return S_OK; }
         catch(...) { return S_OK; } // unavailable C/N is not a fabricated measurement
     }
@@ -271,10 +386,181 @@ public:
 };
 }
 
+namespace {
+const GUID networkProviderClass = {0xb2f3a67c,0x29da,0x4c78,{0x88,0x31,0x09,0x1e,0xd5,0x09,0xa4,0x75}};
+const GUID tunerCategory = {0x71985f48,0x1ca1,0x11d3,{0x9c,0xc8,0x00,0xc0,0x4f,0x79,0x71,0xe0}};
+struct BoardTuner { std::wstring display; CComPtr<IMoniker> moniker; };
+std::string ModeHResult(const char* stage,HRESULT hr) { return std::string(stage)+": "+HResult(hr); }
+bool ReadBoardModes(IKsPropertySet* property,unsigned slot,BYTE* modes) {
+    DWORD returned=0;
+    return SUCCEEDED(property->Get(accessSet,0x3c,nullptr,0,modes,8,&returned)) && returned>slot;
+}
+CComPtr<IPin> FirstPin(IBaseFilter* filter,PIN_DIRECTION wanted) {
+    CComPtr<IEnumPins> pins;
+    if(FAILED(filter->EnumPins(&pins))) return {};
+    for(;;) {
+        CComPtr<IPin> pin;
+        if(pins->Next(1,&pin,nullptr)!=S_OK) return {};
+        PIN_DIRECTION direction{};
+        if(SUCCEEDED(pin->QueryDirection(&direction)) && direction==wanted) return pin;
+    }
+}
+class BoardAccess { // Only the network provider and tuner: the capture chain will not build in the mode being left.
+    CComPtr<IGraphBuilder> graph_;
+    CComPtr<IBaseFilter> provider_,tuner_;
+public:
+    CComPtr<IKsPropertySet> property;
+    explicit BoardAccess(IMoniker* moniker) {
+        HRESULT hr=graph_.CoCreateInstance(CLSID_FilterGraph,nullptr,CLSCTX_INPROC_SERVER);
+        if(FAILED(hr)) throw std::runtime_error(ModeHResult("create filter graph",hr));
+        hr=provider_.CoCreateInstance(networkProviderClass,nullptr,CLSCTX_INPROC_SERVER);
+        if(SUCCEEDED(hr)) hr=graph_->AddFilter(provider_,L"Network Provider");
+        if(FAILED(hr)) throw std::runtime_error(ModeHResult("add network provider",hr));
+        hr=moniker->BindToObject(nullptr,nullptr,IID_IBaseFilter,reinterpret_cast<void**>(&tuner_));
+        if(SUCCEEDED(hr)) hr=graph_->AddFilter(tuner_,L"Tuner");
+        if(FAILED(hr)) throw std::runtime_error(ModeHResult("add tuner",hr));
+        const auto output=FirstPin(provider_,PINDIR_OUTPUT), input=FirstPin(tuner_,PINDIR_INPUT);
+        if(!output || !input) throw std::runtime_error("network provider or tuner has no usable pin");
+        hr=graph_->Connect(output,input);
+        if(FAILED(hr)) throw std::runtime_error(ModeHResult("connect network provider",hr));
+        property=Properties(tuner_);
+    }
+};
+class BdaBoardDriver final : public tbs6812::BoardModeDriver {
+    std::wstring board_;
+    DWORD timeout_;
+    void (*closeGraph_)(void*);
+    void* context_;
+    HANDLE claims_[tbs6812::BoardSlots]{};
+    BoardTuner Find(unsigned slot) const {
+        CComPtr<ICreateDevEnum> devices; CComPtr<IEnumMoniker> monikers;
+        HRESULT hr=devices.CoCreateInstance(CLSID_SystemDeviceEnum,nullptr,CLSCTX_INPROC);
+        if(SUCCEEDED(hr)) hr=devices->CreateClassEnumerator(tunerCategory,&monikers,CDEF_DEVMON_PNP_DEVICE);
+        if(hr!=S_OK) throw std::runtime_error(ModeHResult("enumerate BDA tuners",hr));
+        for(;;) {
+            CComPtr<IMoniker> moniker;
+            if(monikers->Next(1,&moniker,nullptr)!=S_OK) break;
+            LPOLESTR name=nullptr;
+            if(FAILED(moniker->GetDisplayName(nullptr,nullptr,&name))) continue;
+            const std::wstring display=Lower(name);
+            CoTaskMemFree(name);
+            CComPtr<IPropertyBag> bag; CComVariant friendly;
+            if(FAILED(moniker->BindToStorage(nullptr,nullptr,IID_IPropertyBag,reinterpret_cast<void**>(&bag))) ||
+                FAILED(bag->Read(L"FriendlyName",&friendly,nullptr)) || friendly.vt!=VT_BSTR) continue;
+            if(Target(display.c_str(),friendly.bstrVal)==int(slot) && (board_.empty() || BoardPath(display.c_str())==board_))
+                return {display,moniker};
+        }
+        throw std::runtime_error("TBS6812 tuner "+std::to_string(slot)+" is not present");
+    }
+public:
+    BdaBoardDriver(std::wstring board,DWORD timeout,void (*closeGraph)(void*),void* context):board_(std::move(board)),timeout_(timeout),closeGraph_(closeGraph),context_(context) {}
+    bool TryClaim(unsigned slot) override {
+        // The same object BonDriver_BDA holds for an open tuner, visible across sessions.
+        std::wstring name=Find(slot).display;
+        std::replace(name.begin(),name.end(),L'\\',L'/');
+        name=L"Global\\"+name;
+        HANDLE claim=CreateSemaphoreW(nullptr,1,1,name.c_str());
+        if(!claim) return false;
+        if(WaitForSingleObject(claim,0)!=WAIT_OBJECT_0) { CloseHandle(claim); return false; }
+        claims_[slot]=claim;
+        return true;
+    }
+    void Release(unsigned slot) override {
+        ReleaseSemaphore(claims_[slot],1,nullptr);
+        CloseHandle(claims_[slot]);
+        claims_[slot]=nullptr;
+    }
+    tbs6812::BoardModes Read(unsigned slot) override {
+        BoardAccess access(Find(slot).moniker);
+        BYTE modes[8]{};
+        if(!ReadBoardModes(access.property,1,modes)) throw std::runtime_error("cannot read the board modes");
+        return {modes[0],modes[1]};
+    }
+    void Write(unsigned slot,const tbs6812::BoardModes& modes) override {
+        BoardAccess access(Find(slot).moniker);
+        BYTE data[tbs6812::BoardSlots]{modes[0],modes[1]};
+        WriteLog("board mode write: "+std::to_string(modes[0])+","+std::to_string(modes[1])+"; the card restarts");
+        const HRESULT hr=access.property->Set(accessSet,0x3c,data,sizeof(data),data,sizeof(data));
+        if(FAILED(hr)) throw std::runtime_error(ModeHResult("write the board modes",hr));
+    }
+    bool WaitFor(unsigned slot,const tbs6812::BoardModes& modes) override {
+        const auto start=std::chrono::steady_clock::now();
+        while(std::chrono::steady_clock::now()-start<std::chrono::milliseconds(timeout_)) {
+            // The card leaves and returns; failures are expected until a matching reading.
+            MsgWaitForMultipleObjects(0,nullptr,FALSE,500,QS_ALLINPUT);
+            MSG message;
+            while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); }
+            try {
+                if(Read(slot)==modes) {
+                    WriteLog("board mode ready after ms="+std::to_string(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()));
+                    return true;
+                }
+            } catch(const std::exception&) {}
+        }
+        return false;
+    }
+    void CloseOwnGraph() override { if(closeGraph_) closeGraph_(context_); }
+    int SlotOf(const std::wstring& display) const {
+        for(unsigned slot=0;slot<tbs6812::BoardSlots;++slot) {
+            try { if(Find(slot).display==display) return int(slot); } catch(const std::exception&) {}
+        }
+        return -1;
+    }
+};
+}
+
 // Keep thread notifications enabled: this project links the static CRT.
 BOOL WINAPI DllMain(HINSTANCE module,DWORD reason,LPVOID) { if(reason==DLL_PROCESS_ATTACH) selfModule=module; return TRUE; }
 extern "C" __declspec(dllexport) HRESULT CheckAndInitTuner(IBaseFilter*,const WCHAR* display,const WCHAR* friendly,const WCHAR*) {
     return Target(display,friendly)>=0?S_OK:E_INVALIDARG;
+}
+static DWORD BoardSwitchTimeout(const WCHAR* path) {
+    return std::clamp<DWORD>(GetPrivateProfileIntW(L"TBS6812",L"BoardModeSwitchTimeoutMs",45000,path),5000,120000);
+}
+// CheckAndInitTuner for a graph serving one tuning space: skip inputs in the other board mode.
+extern "C" __declspec(dllexport) HRESULT CheckAndInitTunerForSpace(IBaseFilter* tuner,const WCHAR* display,const WCHAR* friendly,const WCHAR* path,DWORD space) {
+    const int slot=Target(display,friendly);
+    if(slot<0 || !tuner) return E_INVALIDARG;
+    try {
+        const auto system=tbs6812::SystemRouting::Read(path).ForSpace(space);
+        if(!system) return E_INVALIDARG;
+        auto property=Properties(tuner);
+        BYTE modes[8]{};
+        if(!ReadBoardModes(property,unsigned(slot),modes)) return E_FAIL;
+        return modes[slot]==tbs6812::BoardModeFor(*system) ? S_OK : E_INVALIDARG;
+    } catch(const std::exception& e) { WriteLog(std::string("check tuner mode: ")+e.what()); return E_FAIL; }
+}
+// Prepares an input in a space's board mode when no other receiver holds the card.
+// HRESULT_FROM_WIN32(ERROR_BUSY) before closeGraph runs leaves the caller's graph untouched.
+extern "C" __declspec(dllexport) HRESULT AlignBoardForSpace(const WCHAR* path,DWORD space,const WCHAR* ownDisplay,void (*closeGraph)(void*),void* context,BOOL* switched) {
+    if(switched) *switched=FALSE;
+    try {
+        const auto system=tbs6812::SystemRouting::Read(path).ForSpace(space);
+        if(!system) return E_INVALIDARG;
+        const auto timeout=BoardSwitchTimeout(path);
+        const auto own=Lower(ownDisplay?ownDisplay:L"");
+        BdaBoardDriver driver(BoardPath(own.c_str()),timeout,closeGraph,context);
+        const int ownSlot=own.empty() ? -1 : driver.SlotOf(own);
+        if(!own.empty() && ownSlot<0) return E_INVALIDARG;
+        const bool rewritten=tbs6812::AlignBoardModes(driver,ownSlot,tbs6812::BoardModeFor(*system));
+        if(switched) *switched=rewritten;
+        return S_OK;
+    }
+    catch(const tbs6812::BoardBusy& e) { WriteLog(std::string("board mode: ")+e.what()); return HRESULT_FROM_WIN32(ERROR_BUSY); }
+    catch(const std::exception& e) { WriteLog(std::string("board mode: ")+e.what()); return E_FAIL; }
+}
+// Returns the card to BoardModeHome after this receiver closed. A busy card stays as it is.
+extern "C" __declspec(dllexport) HRESULT RestoreBoardHome(const WCHAR* path,const WCHAR* boardDisplay) {
+    try {
+        wchar_t text[16]{};
+        GetPrivateProfileStringW(L"TBS6812",L"BoardModeHome",L"",text,16,path);
+        if(!*text) return S_FALSE;
+        const auto home=tbs6812::ParseBoardHome(text);
+        if(!home) { WriteLog("board mode: BoardModeHome must be like S,S or T,S"); return E_INVALIDARG; }
+        const auto display=Lower(boardDisplay?boardDisplay:L"");
+        BdaBoardDriver driver(BoardPath(display.c_str()),BoardSwitchTimeout(path),nullptr,nullptr);
+        return tbs6812::RestoreHomeModes(driver,*home) ? S_OK : S_FALSE;
+    } catch(const std::exception& e) { WriteLog(std::string("board mode: ")+e.what()); return E_FAIL; }
 }
 extern "C" __declspec(dllexport) HRESULT CheckCapture(const WCHAR* tunerDisplay,const WCHAR* tunerFriendly,const WCHAR* captureDisplay,const WCHAR* captureFriendly,const WCHAR*) {
     const int index=Target(tunerDisplay,tunerFriendly);

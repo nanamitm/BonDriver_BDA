@@ -15,8 +15,9 @@ static double elapsed(Clock::time_point start) {
 }
 
 int wmain(int argc, wchar_t** argv) {
-    if (argc != 5) {
-        std::wcerr << L"Usage: bon-driver-probe DLL channel-name seconds output-file\n";
+    const bool expectInitialNoLock = argc == 6 && std::wstring(argv[5]) == L"--expect-initial-no-lock";
+    if (argc != 5 && !expectInitialNoLock) {
+        std::wcerr << L"Usage: bon-driver-probe DLL channel-name seconds output-file [--expect-initial-no-lock]\n";
         return 2;
     }
     const auto dll = std::filesystem::absolute(argv[1]);
@@ -48,6 +49,11 @@ int wmain(int argc, wchar_t** argv) {
         std::cout<<"round="<<round+1<<" space="<<space<<" channel="<<channel<<std::endl;
         start=Clock::now(); const bool tuned=driver2->SetChannel(space,channel)!=FALSE;
         std::cout<<"tune_ok="<<tuned<<" tune_ms="<<elapsed(start)<<std::endl;
+        if(expectInitialNoLock && round==0) {
+            if(tuned) { std::cerr<<"expected initial channel to be unlocked"<<std::endl; success=false; break; }
+            std::cout<<"expected_initial_no_lock; continuing in same open session"<<std::endl;
+            continue;
+        }
         auto capturePath=outputPath;
         if(requested.size()>1) capturePath=outputPath.parent_path()/(outputPath.stem().wstring()+L"-"+std::to_wstring(round+1)+outputPath.extension().wstring());
         std::ofstream output(capturePath,std::ios::binary);
