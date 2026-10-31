@@ -196,6 +196,11 @@ protected:
 	const BOOL _OpenTuner(void);
 	void _CloseTuner(void);
 	const BOOL _SetChannel(const DWORD dwSpace, const DWORD dwChannel);
+	const BOOL _OpenTunerAnySystemType(void);
+	DWORD SpaceForSystemType(unsigned int nType);
+	BOOL PrepareGraphForSpace(const DWORD dwSpace);
+	HRESULT AlignBoardForSpace(const DWORD dwSpace, BOOL bGraphMatches, BOOL * pbSwitched);
+	static void CloseGraphForBoardMode(void * pContext);
 	const float _GetSignalLevel(void);
 	const BOOL _IsTunerOpening(void);
 	const DWORD _GetCurSpace(void);
@@ -1033,6 +1038,15 @@ protected:
 		}
 	};
 	DVBSystemTypeDB m_DVBSystemTypeDB;
+
+	// TuningSpaceの種類が変わる選局時にグラフを作り直す
+	BOOL m_bRebuildGraphForSystemType = FALSE;
+	unsigned int m_nActiveSystemType = 0;		// 現在のグラフが扱うTuningSpaceの種類番号
+	DWORD m_dwGraphSpace = 0xFFFFFFFFUL;		// 現在のグラフの入力選択に使う空間番号
+	BOOL m_bKeepConsumerState = FALSE;			// グラフ再構築中はTS読出し側の状態を残す
+	BOOL m_bBoardAligned = FALSE;				// OpenTuner後にカードのモードを確認済み
+	BOOL m_bGraphLost = FALSE;					// 再構築に失敗してグラフが無い
+	std::wstring m_sOpenTunerGUID;				// 使用中のチューナのDisplayName
 
 	// iniファイルで定義できる最大TuningSpaceの種類データ数
 	static constexpr unsigned int MAX_DVB_SYSTEM_TYPE = 10U;

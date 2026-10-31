@@ -250,6 +250,121 @@ const BOOL CBonTuner::OpenTuner(void)
 	return ret;
 }
 
+// 開けるTuningSpaceの種類を探してOpenTunerする
+const BOOL CBonTuner::_OpenTunerAnySystemType(void)
+{
+	if (!m_bRebuildGraphForSystemType)
+		return _OpenTuner();
+
+	if (m_bOpened)
+		return TRUE;
+
+	m_bBoardAligned = FALSE;
+	std::vector<unsigned int> types{ m_nActiveSystemType };
+	for (auto it = m_DVBSystemTypeDB.SystemType.begin(); it != m_DVBSystemTypeDB.SystemType.end(); it++) {
+		if (it->first != m_nActiveSystemType)
+			types.emplace_back(it->first);
+	}
+	for (unsigned int type : types) {
+		DWORD space = SpaceForSystemType(type);
+		if (space == CBonTuner::SPACE_INVALID)
+			continue;
+		m_nActiveSystemType = type;
+		m_dwGraphSpace = space;
+		if (_OpenTuner())
+			return TRUE;
+	}
+	return FALSE;
+}
+
+DWORD CBonTuner::SpaceForSystemType(unsigned int nType)
+{
+	for (auto it = m_TuningData.Spaces.begin(); it != m_TuningData.Spaces.end(); it++) {
+		unsigned int number = m_DVBSystemTypeDB.IsExist(it->second.DVBSystemTypeNumber) ? it->second.DVBSystemTypeNumber : 0;
+		if (number == nType)
+			return it->first;
+	}
+	return CBonTuner::SPACE_INVALID;
+}
+
+void CBonTuner::CloseGraphForBoardMode(void * pContext)
+{
+	((CBonTuner *)pContext)->_CloseTuner();
+}
+
+HRESULT CBonTuner::AlignBoardForSpace(const DWORD dwSpace, BOOL bGraphMatches, BOOL * pbSwitched)
+{
+	*pbSwitched = FALSE;
+	WCHAR szPath[_MAX_PATH + 1] = L"";
+	::GetModuleFileNameW(st_hModule, szPath, _MAX_PATH + 1);
+	WCHAR szDrive[_MAX_DRIVE];
+	WCHAR szDir[_MAX_DIR];
+	WCHAR szFName[_MAX_FNAME];
+	WCHAR szExt[_MAX_EXT];
+	::_wsplitpath_s(szPath, szDrive, szDir, szFName, szExt);
+	std::wstring sDllName = common::WStringPrintf(L"%s%s%s.dll", szDrive, szDir, m_aTunerParam.sDLLBaseName.c_str());
+
+	HMODULE hModule = ::LoadLibraryW(sDllName.c_str());
+	if (!hModule)
+		return S_OK;
+
+	HRESULT hr = S_OK;
+	HRESULT (* func)(const WCHAR *, DWORD, const WCHAR *, BOOL, void (*)(void *), void *, BOOL *) =
+		(HRESULT (*)(const WCHAR *, DWORD, const WCHAR *, BOOL, void (*)(void *), void *, BOOL *))::GetProcAddress(hModule, "AlignBoardForSpace");
+	if (func)
+		hr = (* func)(m_sIniFilePath.c_str(), dwSpace, m_sOpenTunerGUID.c_str(), bGraphMatches, CBonTuner::CloseGraphForBoardMode, this, pbSwitched);
+	::FreeLibrary(hModule);
+	return hr;
+}
+
+// 選局先の空間に合わせてカードのモードとグラフを準備する
+//   他の受信で使用中のためFALSEを返す場合、現在のグラフはそのまま受信を続ける
+BOOL CBonTuner::PrepareGraphForSpace(const DWORD dwSpace)
+{
+	auto itSpace = m_TuningData.Spaces.find(dwSpace);
+	if (itSpace == m_TuningData.Spaces.end() || (!m_bOpened && !m_bGraphLost))
+		return TRUE;
+
+	unsigned int wanted = m_DVBSystemTypeDB.IsExist(itSpace->second.DVBSystemTypeNumber) ? itSpace->second.DVBSystemTypeNumber : 0;
+	BOOL bGraphMatches = m_bOpened && wanted == m_nActiveSystemType;
+	if (bGraphMatches && m_bBoardAligned)
+		return TRUE;
+
+	const unsigned int previous = m_nActiveSystemType;
+	const DWORD previousSpace = m_dwGraphSpace;
+	BOOL bSwitched = FALSE;
+	BOOL bRet = FALSE;
+	m_bKeepConsumerState = TRUE;
+	HRESULT hr = AlignBoardForSpace(dwSpace, bGraphMatches, &bSwitched);
+	if (SUCCEEDED(hr) && bGraphMatches && m_bOpened) {
+		m_bBoardAligned = TRUE;
+		bRet = TRUE;
+	}
+	else if (SUCCEEDED(hr) || !m_bOpened) {
+		if (m_bOpened)
+			_CloseTuner();
+		// カードが再起動した場合はデバイスを列挙し直す
+		if (bSwitched)
+			m_UsableTunerCaptureList.clear();
+		if (SUCCEEDED(hr)) {
+			m_nActiveSystemType = wanted;
+			m_dwGraphSpace = dwSpace;
+			bRet = _OpenTuner();
+			m_bBoardAligned = bRet;
+		}
+		if (!bRet && previousSpace != CBonTuner::SPACE_INVALID) {
+			// 元の受信へ戻せるなら戻す
+			m_UsableTunerCaptureList.clear();
+			m_nActiveSystemType = previous;
+			m_dwGraphSpace = previousSpace;
+			_OpenTuner();
+		}
+		m_bGraphLost = !m_bOpened;
+	}
+	m_bKeepConsumerState = FALSE;
+	return bRet;
+}
+
 const BOOL CBonTuner::_OpenTuner(void)
 {
 	if (m_bOpened)
@@ -296,7 +411,8 @@ const BOOL CBonTuner::_OpenTuner(void)
 		m_hOnStreamEvent = ::CreateEvent(NULL, FALSE, FALSE, NULL);
 
 		// Decodeイベント作成
-		m_hOnDecodeEvent = ::CreateEvent(NULL, FALSE, FALSE, NULL);
+		if (!m_hOnDecodeEvent)
+			m_hOnDecodeEvent = ::CreateEvent(NULL, FALSE, FALSE, NULL);
 
 		// Decode処理専用スレッド起動
 		m_aDecodeProc.hThread = ::CreateThread(NULL, 0, CBonTuner::DecodeProcThread, this, 0, NULL);
@@ -363,15 +479,20 @@ void CBonTuner::_CloseTuner(void)
 		SAFE_CLOSE_HANDLE(m_aDecodeProc.hThread);
 	}
 
-	// Decodeイベント開放
-	SAFE_CLOSE_HANDLE(m_hOnDecodeEvent);
+	// Decodeイベント開放（グラフ再構築中は読出し側が待機しているので残す）
+	if (!m_bKeepConsumerState)
+		SAFE_CLOSE_HANDLE(m_hOnDecodeEvent);
 
 	// TS受信イベント解放
 	SAFE_CLOSE_HANDLE(m_hOnStreamEvent);
 
 	// バッファ解放
 	PurgeTsStream();
-	SAFE_DELETE(m_LastBuff);
+	if (!m_bKeepConsumerState) {
+		SAFE_DELETE(m_LastBuff);
+		m_bGraphLost = FALSE;
+	}
+	m_sOpenTunerGUID.clear();
 
 	// チューナの信号状態取得用インターフェース解放
 	UnloadTunerSignalStatistics();
@@ -642,6 +763,9 @@ const BOOL CBonTuner::_SetChannel(const DWORD dwSpace, const DWORD dwChannel)
 
 	OutputDebug(L"SetChannel(%d, %d)\n", dwSpace, dwChannel);
 
+	if (m_bRebuildGraphForSystemType && !PrepareGraphForSpace(dwSpace))
+		return FALSE;
+
 	m_dwTargetSpace = m_dwCurSpace = CBonTuner::SPACE_INVALID;
 	m_dwTargetChannel = m_dwCurChannel = CBonTuner::CHANNEL_INVALID;
 
@@ -839,7 +963,7 @@ DWORD WINAPI CBonTuner::COMProcThread(LPVOID lpParameter)
 			{
 
 			case eCOMReqOpenTuner:
-				pCOMProc->uRetVal.OpenTuner = pSys->_OpenTuner();
+				pCOMProc->uRetVal.OpenTuner = pSys->_OpenTunerAnySystemType();
 				::SetEvent(pCOMProc->hEndEvent);
 				break;
 
@@ -1636,6 +1760,9 @@ void CBonTuner::ReadIniFile(void)
 
 	// チューナーに使用するNetworkProvider
 	m_nNetworkProvider = (enumNetworkProvider)IniFileAccess.ReadKeyIValueMapSectionData(L"NetworkProvider", enumNetworkProvider::eNetworkProviderAuto, mapNetworkProvider);
+
+	// TuningSpaceの種類が変わる選局時にグラフを作り直すかどうか
+	m_bRebuildGraphForSystemType = IniFileAccess.ReadKeyBSectionData(L"RebuildGraphForSystemType", FALSE);
 
 	// 衛星受信パラメータ/変調方式パラメータのデフォルト値
 	m_nDefaultNetwork = (enumDefaultNetwork)IniFileAccess.ReadKeyIValueMapSectionData(L"DefaultNetwork", enumDefaultNetwork::eDefaultNetworkSPHD, mapDefaultNetwork);
@@ -3596,6 +3723,13 @@ HRESULT CBonTuner::CheckAndInitTunerDependDll(IBaseFilter * pTunerDevice, std::w
 		return S_OK;
 	}
 
+	if (m_bRebuildGraphForSystemType) {
+		HRESULT (* funcForSpace)(IBaseFilter *, const WCHAR *, const WCHAR *, const WCHAR *, DWORD) =
+			(HRESULT (*)(IBaseFilter *, const WCHAR *, const WCHAR *, const WCHAR *, DWORD))::GetProcAddress(m_hModuleTunerSpecials, "CheckAndInitTunerForSpace");
+		if (funcForSpace)
+			return (* funcForSpace)(pTunerDevice, tunerGUID.c_str(), tunerFriendlyName.c_str(), m_sIniFilePath.c_str(), m_dwGraphSpace);
+	}
+
 	return (* func)(pTunerDevice, tunerGUID.c_str(), tunerFriendlyName.c_str(), m_sIniFilePath.c_str());
 }
 
@@ -4396,7 +4530,7 @@ HRESULT CBonTuner::InitTuningSpace(void)
 	//                → IChannelIDTuneRequest
 	//                → IMPEG2TuneRequest
 	CComPtr<ITuneRequest> pITuneRequest;
-	if (FAILED(hr = m_DVBSystemTypeDB.SystemType[0].pITuningSpace->CreateTuneRequest(&pITuneRequest))) {
+	if (FAILED(hr = m_DVBSystemTypeDB.SystemType[m_nActiveSystemType].pITuningSpace->CreateTuneRequest(&pITuneRequest))) {
 		OutputDebug(L"[InitTuningSpace] Fail to get ITuneRequest interface.\n");
 	}
 	else {
@@ -4435,7 +4569,7 @@ HRESULT CBonTuner::InitTuningSpace(void)
 			}
 		}
 
-		hr = m_pITuner->put_TuningSpace(m_DVBSystemTypeDB.SystemType[0].pITuningSpace);
+		hr = m_pITuner->put_TuningSpace(m_DVBSystemTypeDB.SystemType[m_nActiveSystemType].pITuningSpace);
 		hr = m_pITuner->put_TuneRequest(pITuneRequest);
 
 		// 全て成功
@@ -4468,11 +4602,11 @@ HRESULT CBonTuner::LoadNetworkProvider(void)
 		break;
 	case eNetworkProviderAuto:
 	default:
-		if (m_DVBSystemTypeDB.nNumType > 1) {
+		if (!m_bRebuildGraphForSystemType && m_DVBSystemTypeDB.nNumType > 1) {
 			clsidNetworkProvider = CLSID_NetworkProvider;
 		}
 		else {
-			switch (m_DVBSystemTypeDB.SystemType[0].nDVBSystemType) {
+			switch (m_DVBSystemTypeDB.SystemType[m_nActiveSystemType].nDVBSystemType) {
 			case eTunerTypeDVBS:
 			case eTunerTypeISDBS:
 				clsidNetworkProvider = CLSID_DVBSNetworkProvider;
@@ -4720,6 +4854,7 @@ HRESULT CBonTuner::LoadAndConnectDevice(void)
 		} 
 		else {
 			// 排他確認OK
+			m_sOpenTunerGUID = it->Tuner.GUID;
 			CComPtr<IBaseFilter> pTunerDevice;
 			// チューナデバイスのフィルタを取得
 			if (FAILED(hr = m_pDSFilterEnumTuner->getFilter(&pTunerDevice, it->Tuner.Order))) {
