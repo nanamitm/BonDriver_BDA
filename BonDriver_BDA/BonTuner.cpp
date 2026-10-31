@@ -2065,9 +2065,10 @@ void CBonTuner::ReadIniFile(void)
 			eChGenerateJD1 = 32,				// JCSAT-3A/JCSAT-4B JD1Å`JD16
 			eChGenerateJD17A = 33,				// JCSAT-3A JD17Å`JD28
 			eChGenerateJD17B = 34,				// JCSAT-4B JD17Å`JD32
-			eChGenerateOpticast = 64,			// SKY PerfecTV! Premium Service Hikari H001Å`H058
+			eChGenerateOpticast = 64,			// SKY PerfecTV! Premium Service Hikari H001Å`H105
 			eChGenerateOpticast_11Plus = 72,	// SKY PerfecTV! Premium Service Hikari H011+Å`H012+
 			eChGenerateOpticast_26Plus = 73,	// SKY PerfecTV! Premium Service Hikari H026+Å`H028+
+			eChGenerateOpticast_44Plus = 74, // Optical H044 + 2.2 MHz
 		};
 
 		// É`ÉÉÉìÉlÉãé©ìÆê∂ê¨ópÉpÉâÉÅÅ[É^
@@ -2344,7 +2345,19 @@ void CBonTuner::ReadIniFile(void)
 		}
 		else if (chAuto == L"OPTICAST") {
 			int num = 0;
-			if (bOptAll || (!bOptH11Plus && !bOptH26Plus)) {
+			if (bOptAll) {
+				// Frequency order; omit H011/H012 +1 MHz to avoid duplicate scan results.
+				ChannelGenerate[num++] = L"OPTICAST:0:26," + std::to_wstring(modulationNumberOpticast) + L",,,0";
+				ChannelGenerate[num++] = L"OPTICAST-26+:0:1," + std::to_wstring(modulationNumberOpticast) + L",,,0";
+				ChannelGenerate[num++] = L"OPTICAST:26:1," + std::to_wstring(modulationNumberOpticast) + L",,,0";
+				ChannelGenerate[num++] = L"OPTICAST-26+:1:1," + std::to_wstring(modulationNumberOpticast) + L",,,0";
+				ChannelGenerate[num++] = L"OPTICAST:27:1," + std::to_wstring(modulationNumberOpticast) + L",,,0";
+				ChannelGenerate[num++] = L"OPTICAST-26+:2:1," + std::to_wstring(modulationNumberOpticast) + L",,,0";
+				ChannelGenerate[num++] = L"OPTICAST:28:16," + std::to_wstring(modulationNumberOpticast) + L",,,0";
+				ChannelGenerate[num++] = L"OPTICAST-44+," + std::to_wstring(modulationNumberOpticast) + L",,,0";
+				ChannelGenerate[num++] = L"OPTICAST:44," + std::to_wstring(modulationNumberOpticast) + L",,,0";
+			}
+			else if (!bOptH11Plus && !bOptH26Plus) {
 				ChannelGenerate[num++] = L"OPTICAST," + std::to_wstring(modulationNumberOpticast) + L",,,0";
 			}
 			else if (bOptH11Plus && !bOptH26Plus) {
@@ -2362,10 +2375,6 @@ void CBonTuner::ReadIniFile(void)
 				ChannelGenerate[num++] = L"OPTICAST:12:13," + std::to_wstring(modulationNumberOpticast) + L",,,0";
 				ChannelGenerate[num++] = L"OPTICAST-26+," + std::to_wstring(modulationNumberOpticast) + L",,,0";
 				ChannelGenerate[num++] = L"OPTICAST:28," + std::to_wstring(modulationNumberOpticast) + L",,,0";
-			}
-			if (bOptAll) {
-				ChannelGenerate[num++] = L"OPTICAST-11+," + std::to_wstring(modulationNumberOpticast) + L",,,0";
-				ChannelGenerate[num++] = L"OPTICAST-26+," + std::to_wstring(modulationNumberOpticast) + L",,,0";
 			}
 		}
 
@@ -2531,8 +2540,8 @@ void CBonTuner::ReadIniFile(void)
 			}
 			else if (genSpace == L"OPTICAST") {
 				Generate.Space = eChGenerateOpticast;
-				Generate.Offset = min(offset, 58UL - 1UL);
-				Generate.Count = min(count, 58UL - offset);
+				Generate.Offset = min(offset, 105UL - 1UL);
+				Generate.Count = min(count, 105UL - Generate.Offset);
 				Generate.ModulationNumber = 0UL;
 				Generate.TuningFreq = 0UL;
 				Generate.NameFormat = L"H%03d";
@@ -2556,6 +2565,16 @@ void CBonTuner::ReadIniFile(void)
 				Generate.NameFormat = L"H%03d+";
 				Generate.NameOffset = 26UL;
 			}
+			else if (genSpace == L"OPTICAST-44+") {
+				Generate.Space = eChGenerateOpticast_44Plus;
+				Generate.Offset = 0UL;
+				Generate.Count = min(count, 1UL);
+				Generate.ModulationNumber = 0UL;
+				Generate.TuningFreq = 0UL;
+				Generate.NameFormat = L"H%03d+2.2MHz";
+				Generate.NameOffset = 44UL;
+			}
+
 			// ëäëŒTSçÏê¨êî
 			if (buf2[3] != L"") {
 				Generate.RelativeTS = common::WStringToLong(buf2[3]);
@@ -2674,6 +2693,10 @@ void CBonTuner::ReadIniFile(void)
 			case eChGenerateOpticast_26Plus:
 				freqBase = 259750UL;
 				freqStep = 6500UL;
+				break;
+			case eChGenerateOpticast_44Plus:
+				freqBase = 374950UL;
+				freqStep = 0UL;
 				break;
 			}
 
