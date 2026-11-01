@@ -21,6 +21,7 @@ try {
         Copy-Item -LiteralPath (Join-Path $repo "doc\$document.md") -Destination (Join-Path $stage 'doc')
     }
     Copy-Item -LiteralPath (Join-Path $repo 'README.md') -Destination $stage
+    Copy-Item -LiteralPath (Join-Path $repo 'BdaSpecials\TBS6812\README.md') -Destination (Join-Path $stage 'README-TBS6812.md')
     Copy-Item -LiteralPath (Join-Path $repo 'BdaSpecials\TBS6812\COPYING') -Destination (Join-Path $stage 'COPYING-TBS6812.txt')
     Copy-Item -LiteralPath (Join-Path $repo 'BdaSpecials\TBS6812\NOTICE.md') -Destination (Join-Path $stage 'NOTICE-TBS6812.md')
     Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
