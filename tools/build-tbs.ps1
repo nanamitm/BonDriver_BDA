@@ -23,7 +23,9 @@ $projects = @(
     'projects\muparser\muparser.vcxproj',
     'BdaSpecials\TBS\TBS.vcxproj',
     'BdaSpecials\TBS6812\TBS6812.vcxproj',
-    'BonDriver_BDA\BonDriver.vcxproj'
+    'BonDriver_BDA\BonDriver.vcxproj',
+    'BonDriverHost\BonDriverProxy.vcxproj',
+    'BonDriverHost\BonDriverHost.vcxproj'
 )
 foreach ($project in $projects) {
     $log = Join-Path $logs ((Split-Path $project -Leaf) + '.log')
@@ -34,4 +36,4 @@ foreach ($project in $projects) {
     if ($LASTEXITCODE -ne 0) { throw "Build failed: $project (see $log)" }
 }
 $artifacts = Join-Path $repo 'x64\Release_Static'
-Get-Item -LiteralPath (Join-Path $artifacts 'BonDriver_BDA.dll'), (Join-Path $artifacts 'TBS.dll'), (Join-Path $artifacts 'TBS6812.dll')
+Get-Item -LiteralPath (Join-Path $artifacts 'BonDriver_BDA.dll'), (Join-Path $artifacts 'TBS.dll'), (Join-Path $artifacts 'TBS6812.dll'), (Join-Path $artifacts 'BonDriverProxy.dll'), (Join-Path $artifacts 'BonDriverHost.exe')

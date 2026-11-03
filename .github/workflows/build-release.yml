@@ -34,6 +34,7 @@ jobs:
         run: |
           call tools\test-tbs6812.cmd || exit /b 1
           call tools\test-opticast.cmd || exit /b 1
+          call tools\test-bon-driver-host.cmd || exit /b 1
 
       - name: Package
         shell: pwsh

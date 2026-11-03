@@ -1,6 +1,8 @@
 # BonDriver_BDA
 ##凡銅鑼の野望 ～Genericの章～
 
+受信中の強制終了でブルースクリーンになるチューナー（Digital Devices MAX M4など）には、[BonDriverHost](doc/bondriver-host.md)を使います。
+
 
 TBS6812直接制御の追加実装：
 
