@@ -105,6 +105,7 @@ class Specials final : public IBdaSpecials2b5 {
     std::wstring cacheDirectory_,cachePath_;
     uint64_t deviceHash_=0;
     std::optional<tbs6812::WarmStartRecord> originalRecord_;
+    std::wstring lnbVoltage_=L"13";
     DWORD lockTimeout_=3000;
     uint32_t bootstrapFrequency_=473143;
     uint32_t satelliteBootstrapFrequency_=11727480, satelliteBootstrapTSID_=0x4010;
@@ -190,6 +191,9 @@ public:
     Specials(IBaseFilter* tuner,int index,const wchar_t* display):tuner_(tuner),tunerIndex_(index),identity_(Lower(display?display:L"")) {}
     ~Specials() { if(claim_) CloseHandle(claim_); }
     const HRESULT ReadIniFile(const WCHAR* path) override {
+        wchar_t voltage[8]{};
+        GetPrivateProfileStringW(L"TBS6812",L"LNBVoltage",L"13",voltage,8,path);
+        lnbVoltage_=voltage;
         lockTimeout_=std::clamp<DWORD>(GetPrivateProfileIntW(L"TBS6812",L"LockTimeoutMs",3000,path),100,10000);
         inspectWarm_=GetPrivateProfileIntW(L"TBS6812",L"InspectWarmState",0,path)!=0;
         warmStart_=GetPrivateProfileIntW(L"TBS6812",L"ExperimentalWarmStart",0,path)!=0;
@@ -209,6 +213,7 @@ public:
         std::lock_guard<std::mutex> guard(mutex_);
         try {
             if(!validSystem_) throw std::runtime_error("DeliverySystem must be ISDB-T, ISDB-S, ISDB-S3 or J.83B");
+            if(lnbVoltage_!=L"0" && lnbVoltage_!=L"13" && lnbVoltage_!=L"18") throw std::runtime_error("LNBVoltage must be 0, 13 or 18");
             if(tunerIndex_<0) throw std::runtime_error("only PCI TBS6812 Tuner 0/1 is supported");
             // Stable device-path hash keeps claims independent across slots and cards.
             uint64_t hash=14695981039346656037ULL;
@@ -249,7 +254,10 @@ public:
         if(!property_) return E_FAIL;
         // Only adapter 0 owns the board's LNB supply. Slot 1 must not change it.
         if(tunerIndex_==1) return S_OK;
-        BYTE request[0x94]{}; const DWORD value=active?2:0; // 13 V or off
+        // A temporary satellite carrier for a terrestrial request retains 13 V.
+        const bool high=lnbVoltage_==L"18" && (!requestedSystem_ || *requestedSystem_==system_);
+        BYTE request[0x94]{};
+        const DWORD value=active ? (high ? 1 : 2) : 0;
         memcpy(request+0x0c,&value,sizeof(value));
         return property_->Set(accessSet,0x15,nullptr,0,request,sizeof(request));
     }
@@ -296,13 +304,21 @@ public:
                     Log("bootstrap requires an absolute TSID; relative TS indices are supported after adoption only");
                     return E_INVALIDARG;
                 }
-                bootstrap_=Cable() && cableRequested_ ? *cableRequested_ : *p; bootstrapPending_=true;
-                const HRESULT hr=SetLNBPower(true); if(FAILED(hr)) throw std::runtime_error("LNB preparation failed: "+HResult(hr));
+                bootstrap_=Cable() && cableRequested_ ? *cableRequested_ : *p;
+                if(lnbVoltage_!=L"0") {
+                    const HRESULT hr=SetLNBPower(true);
+                    if(FAILED(hr)) throw std::runtime_error("LNB preparation failed: "+HResult(hr));
+                }
+                bootstrapPending_=true;
                 Log("bootstrap: returning E_NOINTERFACE for the initial vendor tune only");
                 return E_NOINTERFACE;
             }
             const auto start=std::chrono::steady_clock::now();
             SelectCore();
+            if(lnbVoltage_!=L"13") {
+                const HRESULT hr=SetLNBPower(lnbVoltage_==L"18");
+                if(FAILED(hr)) throw std::runtime_error("LNB voltage setting failed: "+HResult(hr));
+            }
             chip_->Tune(frequency,Stream(*p));
             do {
                 if(chip_->Locked()) {
@@ -364,6 +380,16 @@ public:
         if(!bootstrapPending_ || !chip_ || fatal_) return S_OK;
         bootstrapPending_=false;
         try {
+            // Disable the supply before checking lock so a failed vendor tune also gets cleaned up.
+            if(lnbVoltage_==L"0") {
+                const HRESULT hr=SetLNBPower(false);
+                if(FAILED(hr)) throw std::runtime_error("LNB power-off after vendor tune failed: "+HResult(hr));
+            }
+            // Vendor tuning can overwrite the supply setting.
+            if(lnbVoltage_==L"18" && (!requestedSystem_ || *requestedSystem_==system_)) {
+                const HRESULT hr=SetLNBPower(true);
+                if(FAILED(hr)) throw std::runtime_error("LNB voltage setting after vendor tune failed: "+HResult(hr));
+            }
             const bool locked=chip_->Locked();
             if(!locked) {
                 if(!Terrestrial()) throw std::runtime_error("initial vendor tune did not lock; close/reopen before retrying");

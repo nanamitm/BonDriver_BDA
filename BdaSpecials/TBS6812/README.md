@@ -65,6 +65,7 @@ In the `[TBS6812]` section of `BonDriver_TBS6812_Inner.ini`:
 | --- | --- | --- |
 | `DeliverySystem` | | `"ISDB-T/J.83B/ISDB-S/ISDB-S3"` enables switching. Each `[TuningSpaceNN]` then names its own system |
 | `LockTimeoutMs` | 3000 | How long a tune waits for a lock |
+| `LNBVoltage` | 13 | Satellite LNB supply on tuner 0. Use 13 or 18 volts, or 0 to switch off after the initial vendor tune. The vendor driver may briefly enable the supply during that tune. |
 | `AutoBoardMode` | 1 | Set both inputs to satellite mode when opening. 0 leaves the mode to `tbs6812-board-mode.exe write 2 2` |
 | `DirectSettleMs` | 300 | Wait after a lock before buffers are purged, which keeps stale data out of the stream |
 | `BootstrapSatelliteRFKHz` | 11727480 | BS carrier for preparing an input when the first channel is ISDB-T or J.83B |
